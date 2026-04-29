@@ -194,10 +194,10 @@
 
 <header class="cover">
   <span class="badge">USER MANUAL</span>
-  <h1>M5Core2 MIDI Transposer + MIDI Manager</h1>
-  <h2>転調機能と MIDI メッセージ管理を一台で行うパフォーマンスツール</h2>
+  <h1>M5Core2 MIDI Transposer + MIDI Manager<br>OWAMIDICON</h1>
+  <h2>転調機能と MIDI メッセージ管理を一台で行うパフォーマンスツール<br>Programmed by Owa Higashi (おわ/尾和)</h2>
   <div class="meta">
-    Version: 2026-04 / 対応ハード: <b>M5Stack Core2</b> / 接続: <b>USB MIDI / Bluetooth MIDI</b>
+    Version: 2026-04 / 対応ハード: <b>M5Stack Core2</b> / 接続: <b>USB MIDI / Bluetooth HID フットペダル</b>
   </div>
 </header>
 
@@ -211,6 +211,7 @@
     <li><a href="#hardware">本体の見方とボタン</a></li>
     <li><a href="#screen-layout">共通画面の見方</a></li>
     <li><a href="#operation">基本操作のルール</a></li>
+    <li><a href="#footpedal">Bluetooth HID フットペダル</a></li>
     <li><a href="#mode-direct">DIRECT モード</a></li>
     <li><a href="#mode-key">KEY モード</a></li>
     <li><a href="#mode-instant">INSTANT モード</a></li>
@@ -261,10 +262,10 @@
 <section id="hardware">
   <h1 class="section-title">2. 本体の見方とボタン</h1>
   <p>
-    本体の前面には大きく 3 つの物理ボタン
+    本体の前面下部(液晶の下)には 3 つのタッチボタン
     <span class="btn-icon A">A</span><span class="btn-icon B">B</span><span class="btn-icon C">C</span>
-    があります。
-    画面はタッチパネルになっており、画面上のボタンも指で押せます。
+    があります。薄く赤色で丸印が3つ並んでは位置されています。
+    画面表示部もタッチパネルになっており、画面上のボタンも指で押せます。
   </p>
 
   <div class="anchor-header">
@@ -283,7 +284,7 @@
   </div>
 
   <div class="callout">
-    <b class="label">B ボタンが面白い</b>
+    <b class="label">B ボタン(機能切り替え)</b>
     B ボタンの役割は「いま何の画面を見ているか」で変化します。<br>
     例えば DIRECT 画面では <b>レンジ切替</b> ですが、FILTER 画面では <b>Type を順送り</b> になります。
     各モードの説明にある「B の役割」を確認してください。
@@ -322,7 +323,7 @@
     <tr><td><code>C:N</code></td><td>C ボタンに割当中の動作の略称</td></tr>
     <tr><td><code>I:○</code></td><td>受信した MIDI メッセージ数</td></tr>
     <tr><td><code>O:○</code></td><td>送信した MIDI メッセージ数</td></tr>
-    <tr><td><code>BT:…</code></td><td>Bluetooth MIDI の接続状態</td></tr>
+    <tr><td><code>BT:…</code></td><td>Bluetooth HID フットペダル の接続状態</td></tr>
   </table>
 </section>
 
@@ -362,9 +363,72 @@
   </div>
 </section>
 
+<!-- ===== Foot Pedal ===== -->
+<section id="footpedal">
+  <h1 class="section-title">5. Bluetooth HID フットペダル</h1>
+  <p>
+    本機は <b>Bluetooth HID キーボード型のフットペダル</b> に対応しており、
+    手を使わずに転調操作ができます。鍵盤を弾いている最中でも、足元で転調メニューを左右に動かして次の転調値へ切り替えられます。
+  </p>
+
+  <h2>5.1 動作確認済みハード</h2>
+  <div class="callout">
+    <b class="label">対応機種</b>
+    動作保証を行っているのは <b>STRICH 社 SPT-10</b> のみです。
+    他の Bluetooth HID キーボード型フットペダルでも動く可能性はありますが、保証対象外です。
+  </div>
+
+  <h2>5.2 ペアリングと再接続</h2>
+  <p>
+    一度ペアリングすれば、本機の電源を切っても <b>bond 情報 (リンクキー) は本体内に保持</b> されます。
+    次回からは、本機を起動 → ペダル (SPT-10) を電源 ON するだけで、約 20〜30 秒で <b>自動的に再接続</b> します。
+    画面共通ヘッダの <code>BT:…</code> 表示で、現在の接続状態を確認できます。
+  </p>
+  <table>
+    <tr><th>状況</th><th>ペダル LED</th><th>所要時間 (目安)</th></tr>
+    <tr><td>初回ペアリング</td><td>赤青点滅 (ペアリングモード)</td><td>1 分以上</td></tr>
+    <tr><td>2 回目以降の自動再接続</td><td>青点滅 (前回ホスト探索)</td><td>約 20〜30 秒</td></tr>
+  </table>
+  <div class="callout tip">
+    <b class="label">POINT</b>
+    bond 情報は本体内蔵の不揮発メモリ (NVS) に保存され、さらに <b>SD カード上の <code>/bt_bond.dat</code> にもバックアップ</b> されます。
+    NVS が消えてしまった場合 (ファームウェア書き直し等) でも、SD のバックアップから自動復元される設計です。
+  </div>
+  <div class="callout warn">
+    <b class="label">再ペアリングが必要になる場合</b>
+    次のいずれかに当てはまる時のみ、初回扱いの再ペアリングになります。
+    <ul style="margin:.4em 0 0 1.2em">
+      <li>SPT-10 側で別ホストとペアリングし直した</li>
+      <li>本機の NVS が消え、かつ SD カードのバックアップも無い</li>
+    </ul>
+    その場合は、ペダル裏の物理スイッチでペアリングモードに入れて (LED 赤青点滅)、本機を再起動してください。
+  </div>
+
+  <h2>5.3 ペダルの動作</h2>
+  <p>
+    SPT-10 の <b>左ペダル</b> と <b>右ペダル</b> がそれぞれ「左へ」「右へ」のメニュー移動として働きます。
+    どのモードでも基本は <b>転調メニュー上の左右移動</b> ですが、いまどの画面を開いているかによって移動先が変わります。
+  </p>
+
+  <table>
+    <tr><th>画面</th><th>左ペダル</th><th>右ペダル</th></tr>
+    <tr><td><b>DIRECT</b></td><td>表示中の 12 ボタン上で 1 つ左の転調値へ</td><td>1 つ右の転調値へ</td></tr>
+    <tr><td><b>KEY</b></td><td>1 つ左の転調値へ</td><td>1 つ右の転調値へ</td></tr>
+    <tr><td><b>INSTANT</b></td><td>1 つ左の転調値へ</td><td>1 つ右の転調値へ</td></tr>
+    <tr><td><b>SEQUENCE</b></td><td>1 ステップ前へ</td><td>1 ステップ後ろへ</td></tr>
+    <tr><td><b>FILTER</b> / <b>MAPPER</b></td><td colspan="2">未使用 (画面操作はタッチ/ボタンで行ってください)</td></tr>
+  </table>
+
+  <div class="callout tip">
+    <b class="label">活用イメージ</b>
+    SEQUENCE モードに転調パターンを並べておけば、本番中に <b>足だけで次の転調へ進める</b> 演奏スタイルが可能です。
+    INSTANT モードでも、よく使う転調値の並びをペダルで往復するだけで操作が完結します。
+  </div>
+</section>
+
 <!-- ===== DIRECT ===== -->
 <section id="mode-direct">
-  <h1 class="section-title">5. DIRECT モード</h1>
+  <h1 class="section-title">6. DIRECT モード</h1>
   <p>
     画面に並ぶ <b>12 個のボタンを直接タップ</b> して転調値を決める、最も直感的なモードです。
   </p>
@@ -395,7 +459,7 @@
 
 <!-- ===== KEY ===== -->
 <section id="mode-key">
-  <h1 class="section-title">6. KEY モード</h1>
+  <h1 class="section-title">7. KEY モード</h1>
   <p>
     <b>キー名</b> (C, D, E… / Am, Bm, …) で転調値を決めるモードです。
     「曲を G に下げて」と言われたとき、<b>G の鍵盤を押すだけ</b> で済みます。
@@ -431,7 +495,7 @@
 
 <!-- ===== INSTANT ===== -->
 <section id="mode-instant">
-  <h1 class="section-title">7. INSTANT モード</h1>
+  <h1 class="section-title">8. INSTANT モード</h1>
   <p>
     よく使う転調値を <b>巨大なボタンでワンタップ呼び出し</b> するモードです。
     ライブ中で素早く 1 度や半音だけ動かしたいときに最適です。
@@ -459,7 +523,7 @@
 
 <!-- ===== SEQUENCE ===== -->
 <section id="mode-sequence">
-  <h1 class="section-title">8. SEQUENCE モード</h1>
+  <h1 class="section-title">9. SEQUENCE モード</h1>
   <p>
     <b>転調値の並び (パターン)</b> を作っておき、ステップごとに切り替えていけるモードです。
     曲の進行 (例: A メロ → サビ → 転調サビ) をあらかじめ仕込んでおけます。
@@ -499,7 +563,7 @@
 
 <!-- ===== MIDI Manager ===== -->
 <section id="midi-manager">
-  <h1 class="section-title">9. MIDI Manager とは</h1>
+  <h1 class="section-title">10. MIDI Manager とは</h1>
   <p>
     転調以外の <b>「不要メッセージのカット」「メッセージ書き換え」</b> を担当する、もう一つのグループです。
     <span class="tag long">C 長押し</span> で転調グループから移動できます。
@@ -527,7 +591,7 @@
 
 <!-- ===== FILTER ===== -->
 <section id="mode-filter">
-  <h1 class="section-title">10. FILTER モード</h1>
+  <h1 class="section-title">11. FILTER モード</h1>
   <p>
     特定の MIDI メッセージを <b>遮断</b> するためのモードです。
     例えば「ジョイスティックの Pitch Bend が暴れるのでカットしたい」「Ch10 のドラムは流したくない」というケースで使います。
@@ -589,7 +653,7 @@
 
 <!-- ===== MAPPER ===== -->
 <section id="mode-mapper">
-  <h1 class="section-title">11. MAPPER モード</h1>
+  <h1 class="section-title">12. MAPPER モード</h1>
   <p>
     入力メッセージを <b>別の MIDI メッセージへ書き換える</b> モードです。
     1 つのルールは <b>PG1 (変換元条件)</b> と <b>PG2 (変換先設定)</b> の 2 ページから構成されます。
@@ -658,7 +722,7 @@
 
 <!-- ===== Bypass ===== -->
 <section id="bypass">
-  <h1 class="section-title">12. BYPASS と ACTIVE</h1>
+  <h1 class="section-title">13. BYPASS と ACTIVE</h1>
   <p>
     FILTER と MAPPER は <b>独立して</b> ON / OFF できます。
     上段右の大ボタンが <span class="tag bypass">BYPASS</span> のときは <b>素通し</b>、
@@ -692,7 +756,7 @@
 
 <!-- ===== Flow ===== -->
 <section id="flow">
-  <h1 class="section-title">13. MIDI 処理の流れ</h1>
+  <h1 class="section-title">14. MIDI 処理の流れ</h1>
   <p>受信から送信までの順序は固定です。途中で BYPASS された段はそのままスルーされます。</p>
 
   <div class="flow">
@@ -719,7 +783,7 @@
 
 <!-- ===== Serial ===== -->
 <section id="serial">
-  <h1 class="section-title">14. PC 連携 (USB シリアル)</h1>
+  <h1 class="section-title">15. PC 連携 (USB シリアル)</h1>
   <p>
     本機は USB シリアルから操作できます。
     将来、PC 側で大画面 GUI を作る際に、本体の UI をそのまま遠隔操作できるよう設計されています。
@@ -771,7 +835,7 @@ OK SCREENSHOT_DONE
 
 <!-- ===== Tips ===== -->
 <section id="tips">
-  <h1 class="section-title">15. 困ったときに</h1>
+  <h1 class="section-title">16. 困ったときに</h1>
 
   <table>
     <tr><th>症状</th><th>確認ポイント</th></tr>

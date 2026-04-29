@@ -917,6 +917,69 @@ void key_callback(uint8_t *p_msg)
     portEXIT_CRITICAL(&g_keyStateMux);
 }
 
+// ---- 起動スプラッシュ "OWAMIDICON" ----
+static void showSplashScreen() {
+  const int W = SCREEN_WIDTH;
+  const int H = SCREEN_HEIGHT;
+
+  M5.Lcd.fillScreen(BLACK);
+
+  // 上下のグラデーションバー (シアン→マゼンタ)
+  for (int i = 0; i < 6; i++) {
+    uint8_t r = (uint8_t)((i * 220) / 5);
+    uint8_t g = (uint8_t)(180 - i * 28);
+    uint8_t b = (uint8_t)(255 - i * 8);
+    uint16_t c = M5.Lcd.color565(r, g, b);
+    M5.Lcd.drawFastHLine(0, 26 + i, W, c);
+    M5.Lcd.drawFastHLine(0, H - 32 + i, W, c);
+  }
+
+  // 左右の縦アクセント線
+  M5.Lcd.drawFastVLine(6,     26, H - 58, M5.Lcd.color565(0, 200, 255));
+  M5.Lcd.drawFastVLine(W - 7, 26, H - 58, M5.Lcd.color565(220, 0, 255));
+
+  // タイトル "OWAMIDICON" — グロー風 3 段シャドウ
+  uiFontHuge();
+  M5.Lcd.setTextDatum(MC_DATUM);
+  const char* title = "OWAMIDICON";
+  const int titleY = H / 2 - 22;
+  M5.Lcd.setTextColor(M5.Lcd.color565(0,  30,  90));
+  M5.Lcd.drawString(title, W / 2 + 3, titleY + 3);
+  M5.Lcd.setTextColor(M5.Lcd.color565(0, 110, 200));
+  M5.Lcd.drawString(title, W / 2 + 1, titleY + 1);
+  M5.Lcd.setTextColor(CYAN);
+  M5.Lcd.drawString(title, W / 2,     titleY);
+
+  // タイトル下の細い装飾ライン
+  M5.Lcd.drawFastHLine(W / 2 - 90, titleY + 24, 180, M5.Lcd.color565(0, 180, 255));
+  M5.Lcd.drawFastHLine(W / 2 - 60, titleY + 27, 120, M5.Lcd.color565(180, 0, 220));
+
+  // サブタイトル
+  uiFontSmall();
+  M5.Lcd.setTextColor(WHITE);
+  M5.Lcd.drawString("MIDI Transposer + MIDI Message Manager", W / 2, H / 2 + 28);
+
+  // エディション表記
+  M5.Lcd.setTextColor(M5.Lcd.color565(200, 80, 220));
+  M5.Lcd.drawString("M5Stack Core2 Edition", W / 2, H / 2 + 50);
+
+  // 下部ローディングバーのアニメーション
+  const int barX = 30;
+  const int barY = H - 50;
+  const int barW = W - 60;
+  const int barH = 4;
+  M5.Lcd.drawRect(barX - 1, barY - 1, barW + 2, barH + 2, DARKGREY);
+  for (int i = 0; i <= barW; i += 4) {
+    uint8_t r = (uint8_t)((i * 220) / barW);
+    uint8_t b = (uint8_t)(255 - (i * 60) / barW);
+    uint16_t c = M5.Lcd.color565(r, 100, b);
+    M5.Lcd.fillRect(barX + (i - 4 < 0 ? 0 : i - 4), barY, 4, barH, c);
+    delay(4);
+  }
+
+  delay(700);
+}
+
 void setup() {
   M5.begin(true, true, true, true);
 
@@ -987,6 +1050,7 @@ void setup() {
   }
 
   M5.Lcd.fillScreen(BLACK);
+  showSplashScreen();
   drawInterface();
 
   Serial.println("MIDI Transposer Ready!");
