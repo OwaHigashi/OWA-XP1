@@ -15,6 +15,13 @@
 #include "src/MD_MIDIFile/MD_MIDIFile.h"
 #include <Free_Fonts.h>
 
+// 内蔵音源 (M5 Unit MIDI 内蔵 SAM2695) の有無を 1/0 で指定する。
+// 1 のときだけ PLAY モード (本体が直接発音するモード) が有効になる。
+// 外付け MIDI Module2 (本体に音源なし) など内蔵音源が無いハード構成では、
+// 0 を指定してこのモードを除外する。SMF Player は両方のハードで使えるので
+// 影響しない (0 のときは SMF Player が長押しサイクルの 3 群目に入る)。
+#define MIDIXPOSE_HAS_LOCAL_SYNTH 1
+
 // ---- testtone (PLAY mode) 用の型・定数を先頭に置く ----
 // 理由: Arduino auto-prototype 機構が、後に定義される static 関数の
 // プロトタイプをファイル冒頭に自動挿入する。それらは PlayToneSourceKind /
@@ -1399,7 +1406,11 @@ void setup() {
   initInstantModeButtons();
   initSequenceModeButtons();
   initMidiManagementDefaults();
+#if MIDIXPOSE_HAS_LOCAL_SYNTH
   enterDisplayMode(PLAY_MODE);
+#else
+  enterDisplayMode(DIRECT_MODE);
+#endif
 
   // SDカード状態確認
   if (SD.cardType() == CARD_NONE) {
@@ -3524,21 +3535,45 @@ void enterDisplayMode(int newMode) {
 void advanceDisplayMode() {
   sendAllNotesOff();
 
+#if MIDIXPOSE_HAS_LOCAL_SYNTH
+  // 内蔵音源あり: PLAY -> 転調 -> MIDI Manager -> PLAY のサイクル
+  // (SMF Player は PLAY からの C 短押しでのみ入る別経路)
   if (currentMode == PLAY_MODE) {
     DisplayMode restoreMode = isTransposeDisplayMode(lastTransposeMode) ? lastTransposeMode : DIRECT_MODE;
     enterDisplayMode(restoreMode);
     Serial.printf("Group: TRANSPOSE (%d)\n", restoreMode);
   } else if (isTransposeDisplayMode(currentMode)) {
-    if (isTransposeDisplayMode(currentMode)) {
-      lastTransposeMode = currentMode;
-    }
+    lastTransposeMode = currentMode;
     midiManagePage = MIDI_PAGE_FILTER;
     enterDisplayMode(MIDI_MANAGE_MODE);
     Serial.println("Group: MIDI_MANAGE");
-  } else {
+  } else if (currentMode == MIDI_MANAGE_MODE) {
     enterDisplayMode(PLAY_MODE);
     Serial.println("Group: PLAY");
+  } else {
+    // SMF_PLAYER -> PLAY (handleButtonCLongAction で先回り済だが念のため)
+    smfPlayerExit();
+    enterDisplayMode(PLAY_MODE);
+    Serial.println("Group: PLAY (from SMF)");
   }
+#else
+  // 内蔵音源なし: 転調 -> MIDI Manager -> SMF Player -> 転調 のサイクル
+  if (isTransposeDisplayMode(currentMode)) {
+    lastTransposeMode = currentMode;
+    midiManagePage = MIDI_PAGE_FILTER;
+    enterDisplayMode(MIDI_MANAGE_MODE);
+    Serial.println("Group: MIDI_MANAGE");
+  } else if (currentMode == MIDI_MANAGE_MODE) {
+    enterDisplayMode(SMF_PLAYER_MODE);
+    Serial.println("Group: SMF_PLAYER");
+  } else {
+    // SMF_PLAYER -> 転調 (最後に開いていた転調モード)
+    smfPlayerExit();
+    DisplayMode restoreMode = isTransposeDisplayMode(lastTransposeMode) ? lastTransposeMode : DIRECT_MODE;
+    enterDisplayMode(restoreMode);
+    Serial.printf("Group: TRANSPOSE (%d)\n", restoreMode);
+  }
+#endif
 }
 
 void advanceSubMode() {
@@ -4257,12 +4292,14 @@ void handleButtonBAction() {
 }
 
 void handleButtonCShortAction() {
+#if MIDIXPOSE_HAS_LOCAL_SYNTH
   if (currentMode == PLAY_MODE) {
     // PLAY モードからは SMF Player へ入る
     enterDisplayMode(SMF_PLAYER_MODE);
     Serial.println("Enter SMF Player");
     return;
   }
+#endif
   if (currentMode == SMF_PLAYER_MODE) {
     // 次曲へ（再生中なら止めてから次再生、停止中ならファイル選択のみ）
     if (g_smfState == SMF_PLAYING) {
@@ -4287,13 +4324,17 @@ void handleButtonCShortAction() {
 }
 
 void handleButtonCLongAction() {
+#if MIDIXPOSE_HAS_LOCAL_SYNTH
   if (currentMode == SMF_PLAYER_MODE) {
-    // SMF モードからは長押しで PLAY に戻る
+    // 内蔵音源あり: SMF からは長押しで PLAY に直帰
     smfPlayerExit();
     enterDisplayMode(PLAY_MODE);
     Serial.println("Leave SMF Player -> PLAY");
     return;
   }
+#endif
+  // 内蔵音源なしの場合は SMF も通常のグループサイクルに含めて
+  // advanceDisplayMode() で扱う (SMF -> 転調)
   advanceDisplayMode();
 }
 
