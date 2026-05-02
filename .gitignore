@@ -1,1 +1,7 @@
 build/
+*.ppm
+*.log
+*.pdf
+chat.txt
+screenshots/retest/
+*.exe

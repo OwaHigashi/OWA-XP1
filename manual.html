@@ -197,7 +197,7 @@
   <h1>M5Core2 MIDI Transposer + MIDI Manager<br>OWAMIDICON</h1>
   <h2>転調機能と MIDI メッセージ管理を一台で行うパフォーマンスツール<br>Programmed by Owa Higashi (おわ/尾和)</h2>
   <div class="meta">
-    Version: 2026-05 / 対応ハード: <b>M5Stack Core2</b> + <b>M5 Unit MIDI (SAM2695)</b> / 接続: <b>USB MIDI / Bluetooth HID フットペダル</b>
+    Version: 2026-05 / 対応ハード: <b>M5Stack Core2</b> + <b>M5 Unit MIDI (SAM2695)</b> / 接続: <b>USB MIDI / Bluetooth HID フットペダル</b> / 機能: <b>SMF プレーヤー搭載</b>
   </div>
 </header>
 
@@ -209,6 +209,7 @@
   <ol>
     <li><a href="#about">この製品でできること</a></li>
     <li><a href="#mode-play">演奏 (PLAY) モード <span class="tag short">起動直後</span></a></li>
+    <li><a href="#mode-smf">SMF プレーヤー <span class="tag short">新規</span></a></li>
     <li><a href="#hardware">本体の見方とボタン</a></li>
     <li><a href="#screen-layout">共通画面の見方</a></li>
     <li><a href="#operation">基本操作のルール</a></li>
@@ -257,6 +258,12 @@
       <p>MIDI メッセージを <b>別のメッセージに変換</b> します。<br>
         例えば「CC#1 を CC#11 に置き換える」「Ch1 を Ch3 に流す」といった変換ができます。</p>
     </div>
+    <div class="card">
+      <h3>SMF プレーヤー <span class="tag short">新規</span></h3>
+      <p>SD の <code>/smf</code> フォルダ内の <b>.mid / .smf ファイルを再生</b> します。
+        16 チャンネル分の鍵盤を画面下に表示し、Note On に応じてキーが点灯します。
+        SysEx メッセージにも対応します。</p>
+    </div>
   </div>
   <div class="callout tip">
     <b class="label">POINT</b>
@@ -279,8 +286,12 @@
   <p>
     起動直後の <b>基本モード</b> です。M5 Unit MIDI 内蔵の SAM2695 (GM 音源) を直接鳴らします。
     外部 MIDI キーボードを接続すれば、押した鍵盤の音がそのまま Unit MIDI から鳴ります。
-    キーボードがない場合でも、画面下の <code>TEST PHRASE</code> を押せばドビュッシー「アラベスク第1番」の冒頭が試聴できます。
+    キーボードがない場合でも、画面下の <code>TEST TONE</code> を押せば SD カードの <code>/SMF/testtone.smf</code> (なければ簡易フレーズ <code>CDEFGABC</code>) が試聴できます。
   </p>
+  <div class="callout tip">
+    <b class="label">起動スプラッシュ</b>
+    電源投入から PLAY モード表示までの間、約 4 秒の "OWAMIDICON" オープニング (虹色グロー脈動 + スイープインのバー + ローディングバー) が流れます。
+  </div>
 
   <div class="pair">
     <figure class="shot">
@@ -305,7 +316,7 @@
     <tr><td>音色名バー</td><td>現在の Program 番号と GM 音色名 (タップで一覧ピッカーを開く)</td></tr>
     <tr><td>ボタン上段</td><td><code>VOL-</code> / <code>VOL+</code> / <code>PRG-</code> / <code>PRG+</code></td></tr>
     <tr><td>ボタン下段</td><td><code>PB-</code> / <code>PB+</code> / <code>SUS</code> (サスティンON/OFF) / <code>INIT</code> (再初期化)</td></tr>
-    <tr><td>最下段</td><td><code>TEST PHRASE</code> ボタン (アラベスク冒頭)</td></tr>
+    <tr><td>最下段</td><td><code>TEST TONE</code> ボタン (SD <code>/SMF/testtone.smf</code> を再生 / 無ければ簡易フレーズ)</td></tr>
   </table>
 
   <h3>操作早見表</h3>
@@ -317,9 +328,9 @@
     <tr><td><code>PB-</code> / <code>PB+</code></td><td>Pitch Bend を 256 ステップ単位で増減 (0–16383, 中央=8192)</td></tr>
     <tr><td><code>SUS</code></td><td>CC#64 サスティンを ON / OFF トグル</td></tr>
     <tr><td><code>INIT</code></td><td>GS Reset → Volume / Program / Bend / Sustain を初期値で送り直す</td></tr>
-    <tr><td><code>TEST PHRASE</code></td><td>現在の音色でアラベスク冒頭を演奏</td></tr>
+    <tr><td><code>TEST TONE</code></td><td>SD カードの SMF (testtone.smf) を再生 (なければ簡易フレーズ)</td></tr>
     <tr><td><span class="btn-icon B">B</span></td><td><code>INIT</code> と同じ (再初期化)</td></tr>
-    <tr><td><span class="btn-icon C">C</span> 短押し</td><td>パニック (All Notes Off を全 16ch に送出)</td></tr>
+    <tr><td><span class="btn-icon C">C</span> 短押し</td><td><b>SMF プレーヤーを開く</b></td></tr>
     <tr><td><span class="btn-icon C">C</span> 長押し</td><td>転調グループへ移動 (最後に開いていた転調サブモードへ)</td></tr>
   </table>
 
@@ -335,15 +346,70 @@
     <ol style="margin:.4em 0 0 1.2em">
       <li>Unit MIDI が <b>Port A</b> (Grove) に挿さっていることを確認</li>
       <li><code>INIT</code> を押して Volume / Program / Pitch Bend を既定値に戻す</li>
-      <li><code>TEST PHRASE</code> を押し、Unit MIDI のヘッドホン端子から音が出るか確認</li>
+      <li><code>TEST TONE</code> を押し、Unit MIDI のヘッドホン端子から音が出るか確認</li>
       <li>それでも無音なら、Port A に他の I2C デバイスを挿していないか確認 (UART と排他)</li>
     </ol>
   </div>
 </section>
 
+<!-- ===== SMF Player ===== -->
+<section id="mode-smf">
+  <h1 class="section-title">3. SMF プレーヤー <span class="tag short">新規</span></h1>
+  <p>
+    PLAY モードで <span class="btn-icon C">C</span> 短押し すると <b>SMF プレーヤー画面</b>に切り替わります。
+    SD カードの <code>/smf</code> または <code>/SMF</code> フォルダにある <code>.mid</code> / <code>.smf</code> ファイルを再生します。
+    <b>16 チャンネルの鍵盤を画面下部に表示</b>し、再生中は Note On に応じてキーが緑 (白鍵) / オレンジ (黒鍵) で点灯します。
+    System Exclusive メッセージにも対応しており、ペイロードはそのまま MIDI OUT (Unit MIDI) に流れます。
+  </p>
+
+  <div class="pair">
+    <figure class="shot">
+      <div class="frame">
+        <img src="screenshots/09-smf-stop.png" alt="SMF Player 停止中">
+      </div>
+      <figcaption>図 2.5-1: SMF プレーヤー (停止中)。右上に停止アイコン (白い四角)。</figcaption>
+    </figure>
+    <figure class="shot">
+      <div class="frame">
+        <img src="screenshots/10-smf-playing.png" alt="SMF Player 再生中">
+      </div>
+      <figcaption>図 2.5-2: SMF プレーヤー (再生中)。右上に黄色い再生三角。下部に 16 ch 鍵盤。</figcaption>
+    </figure>
+  </div>
+
+  <h3>使い方</h3>
+  <ol>
+    <li>microSD カードに <code>/smf</code> (または <code>/SMF</code>) フォルダを作り、<code>.mid</code> / <code>.smf</code> ファイルを入れる。</li>
+    <li>本体起動後、<b>PLAY モード</b>で <span class="btn-icon C">C</span> を <b>短押し</b> → SMF プレーヤー画面が開く (初回はスキャンに数秒かかる)。</li>
+    <li><span class="btn-icon A">A</span> で前曲、<span class="btn-icon C">C</span> 短押しで次曲を選ぶ。</li>
+    <li><span class="btn-icon B">B</span> で再生 / 停止 をトグル。</li>
+    <li>戻るには <span class="btn-icon C">C</span> を <b>長押し</b>。再生中は自動で停止し All Notes Off を送ります。</li>
+  </ol>
+
+  <h3>操作早見表</h3>
+  <table>
+    <tr><th>操作</th><th>働き</th></tr>
+    <tr><td><span class="btn-icon A">A</span> 短押し</td><td>前の曲へ (再生中なら次の曲も自動再生)</td></tr>
+    <tr><td><span class="btn-icon B">B</span> 短押し</td><td>再生 / 停止トグル</td></tr>
+    <tr><td><span class="btn-icon C">C</span> 短押し</td><td>次の曲へ (再生中なら次の曲も自動再生)</td></tr>
+    <tr><td><span class="btn-icon C">C</span> 長押し</td><td>SMF プレーヤーを抜けて PLAY モードへ戻る</td></tr>
+  </table>
+
+  <div class="callout">
+    <b class="label">仕様メモ</b>
+    <ul style="margin:.4em 0 0 1.2em">
+      <li>SMF パーサは <code>MD_MIDIFile</code> ライブラリ (リポジトリ <code>src/MD_MIDIFile/</code> に同梱、移植元: <code>../M5Core2-SMF-Player</code>) を使用</li>
+      <li>曲が終わると自動で次曲へ進みます</li>
+      <li>SMF プレーヤー入室時に SD バスを <code>SD.h</code> から <code>SdFat</code> に譲渡し、退出時に戻します。
+        滞在中はシーケンスパターンの SD 保存などが一時停止します。</li>
+      <li>タッチ操作はありません (A/B/C ボタンのみ)</li>
+    </ul>
+  </div>
+</section>
+
 <!-- ===== Hardware ===== -->
 <section id="hardware">
-  <h1 class="section-title">3. 本体の見方とボタン</h1>
+  <h1 class="section-title">4. 本体の見方とボタン</h1>
   <p>
     本体の前面下部(液晶の下)には 3 つのタッチボタン
     <span class="btn-icon A">A</span><span class="btn-icon B">B</span><span class="btn-icon C">C</span>
@@ -376,7 +442,7 @@
 
 <!-- ===== Screen layout ===== -->
 <section id="screen-layout">
-  <h1 class="section-title">4. 共通画面の見方</h1>
+  <h1 class="section-title">5. 共通画面の見方</h1>
   <p>
     すべての画面の最上段には <b>共通のステータス行</b> が表示されます。
     このステータス行の意味さえ覚えれば、どの画面でも迷いません。
@@ -412,7 +478,7 @@
 
 <!-- ===== Operation ===== -->
 <section id="operation">
-  <h1 class="section-title">5. 基本操作のルール</h1>
+  <h1 class="section-title">6. 基本操作のルール</h1>
 
   <h2>5.1 画面の階層</h2>
   <p>本機の画面は 3 つのグループに分かれます。</p>
@@ -426,14 +492,16 @@
   </div>
   <p>
     <span class="tag long">C 長押し</span> でグループを巡回します (PLAY → 転調 → MIDI 管理 → PLAY)。<br>
-    <span class="tag short">C 短押し</span> で同じグループ内のモードを順送りします (PLAY モードでは Panic として動作)。
+    <span class="tag short">C 短押し</span> で同じグループ内のモードを順送りします。
+    <b>PLAY モードでは <span class="tag short">C 短押し</span> が SMF プレーヤー入口</b>になります。
+    SMF プレーヤー中は <span class="tag long">C 長押し</span> で PLAY に戻ります。
   </p>
 
   <h2>5.2 グループ内のモード遷移</h2>
-  <div class="grid cols-3">
+  <div class="grid cols-4">
     <div class="card">
       <h3>演奏グループ</h3>
-      <p style="font-size:1.05rem"><b>PLAY</b> 単独 (C 短押しはパニック)</p>
+      <p style="font-size:1.05rem"><b>PLAY</b> ⇄ <b>SMF プレーヤー</b> (PLAY で C 短押し / SMF で C 長押し)</p>
     </div>
     <div class="card">
       <h3>転調グループ (C 短押しで巡回)</h3>
@@ -445,6 +513,10 @@
       <h3>MIDI 管理グループ (C 短押しで往復)</h3>
       <p style="font-size:1.05rem"><b>FILTER</b> ⇄ <b>MAPPER</b></p>
     </div>
+    <div class="card">
+      <h3>SMF プレーヤー (A/B/C 専用)</h3>
+      <p style="font-size:1.05rem"><b>A</b>=前曲 / <b>B</b>=再生停止 / <b>C 短押し</b>=次曲 / <b>C 長押し</b>=PLAY へ</p>
+    </div>
   </div>
   <div class="callout tip">
     <b class="label">便利</b>
@@ -455,7 +527,7 @@
 
 <!-- ===== Foot Pedal ===== -->
 <section id="footpedal">
-  <h1 class="section-title">6. Bluetooth HID フットペダル</h1>
+  <h1 class="section-title">7. Bluetooth HID フットペダル</h1>
   <p>
     本機は <b>Bluetooth HID キーボード型のフットペダル</b> に対応しており、
     手を使わずに転調操作ができます。鍵盤を弾いている最中でも、足元で転調メニューを左右に動かして次の転調値へ切り替えられます。
@@ -513,7 +585,7 @@
 
 <!-- ===== DIRECT ===== -->
 <section id="mode-direct">
-  <h1 class="section-title">7. DIRECT モード</h1>
+  <h1 class="section-title">8. DIRECT モード</h1>
   <p>
     画面に並ぶ <b>12 個のボタンを直接タップ</b> して転調値を決める、最も直感的なモードです。
   </p>
@@ -544,7 +616,7 @@
 
 <!-- ===== KEY ===== -->
 <section id="mode-key">
-  <h1 class="section-title">8. KEY モード</h1>
+  <h1 class="section-title">9. KEY モード</h1>
   <p>
     <b>キー名</b> (C, D, E… / Am, Bm, …) で転調値を決めるモードです。
     「曲を G に下げて」と言われたとき、<b>G の鍵盤を押すだけ</b> で済みます。
@@ -580,7 +652,7 @@
 
 <!-- ===== INSTANT ===== -->
 <section id="mode-instant">
-  <h1 class="section-title">9. INSTANT モード</h1>
+  <h1 class="section-title">10. INSTANT モード</h1>
   <p>
     よく使う転調値を <b>巨大なボタンでワンタップ呼び出し</b> するモードです。
     ライブ中で素早く 1 度や半音だけ動かしたいときに最適です。
@@ -608,7 +680,7 @@
 
 <!-- ===== SEQUENCE ===== -->
 <section id="mode-sequence">
-  <h1 class="section-title">10. SEQUENCE モード</h1>
+  <h1 class="section-title">11. SEQUENCE モード</h1>
   <p>
     <b>転調値の並び (パターン)</b> を作っておき、ステップごとに切り替えていけるモードです。
     曲の進行 (例: A メロ → サビ → 転調サビ) をあらかじめ仕込んでおけます。
@@ -648,7 +720,7 @@
 
 <!-- ===== MIDI Manager ===== -->
 <section id="midi-manager">
-  <h1 class="section-title">11. MIDI Manager とは</h1>
+  <h1 class="section-title">12. MIDI Manager とは</h1>
   <p>
     転調以外の <b>「不要メッセージのカット」「メッセージ書き換え」</b> を担当する、もう一つのグループです。
     <span class="tag long">C 長押し</span> で転調グループから移動できます。
@@ -676,7 +748,7 @@
 
 <!-- ===== FILTER ===== -->
 <section id="mode-filter">
-  <h1 class="section-title">12. FILTER モード</h1>
+  <h1 class="section-title">13. FILTER モード</h1>
   <p>
     特定の MIDI メッセージを <b>遮断</b> するためのモードです。
     例えば「ジョイスティックの Pitch Bend が暴れるのでカットしたい」「Ch10 のドラムは流したくない」というケースで使います。
@@ -738,7 +810,7 @@
 
 <!-- ===== MAPPER ===== -->
 <section id="mode-mapper">
-  <h1 class="section-title">13. MAPPER モード</h1>
+  <h1 class="section-title">14. MAPPER モード</h1>
   <p>
     入力メッセージを <b>別の MIDI メッセージへ書き換える</b> モードです。
     1 つのルールは <b>PG1 (変換元条件)</b> と <b>PG2 (変換先設定)</b> の 2 ページから構成されます。
@@ -807,7 +879,7 @@
 
 <!-- ===== Bypass ===== -->
 <section id="bypass">
-  <h1 class="section-title">14. BYPASS と ACTIVE</h1>
+  <h1 class="section-title">15. BYPASS と ACTIVE</h1>
   <p>
     FILTER と MAPPER は <b>独立して</b> ON / OFF できます。
     上段右の大ボタンが <span class="tag bypass">BYPASS</span> のときは <b>素通し</b>、
@@ -841,7 +913,7 @@
 
 <!-- ===== Flow ===== -->
 <section id="flow">
-  <h1 class="section-title">15. MIDI 処理の流れ</h1>
+  <h1 class="section-title">16. MIDI 処理の流れ</h1>
   <p>受信から送信までの順序は固定です。途中で BYPASS された段はそのままスルーされます。</p>
 
   <div class="flow">
@@ -868,7 +940,7 @@
 
 <!-- ===== Serial ===== -->
 <section id="serial">
-  <h1 class="section-title">16. PC 連携 (USB シリアル)</h1>
+  <h1 class="section-title">17. PC 連携 (USB シリアル)</h1>
   <p>
     本機は USB シリアルから操作できます。
     将来、PC 側で大画面 GUI を作る際に、本体の UI をそのまま遠隔操作できるよう設計されています。
@@ -921,7 +993,7 @@ OK SCREENSHOT_DONE
 
 <!-- ===== Tips ===== -->
 <section id="tips">
-  <h1 class="section-title">17. 困ったときに</h1>
+  <h1 class="section-title">18. 困ったときに</h1>
 
   <table>
     <tr><th>症状</th><th>確認ポイント</th></tr>
@@ -930,7 +1002,7 @@ OK SCREENSHOT_DONE
       <td>
         Unit MIDI が <b>Port A (Grove)</b> に接続されているか確認。<br>
         画面下の <code>INIT</code> または <span class="btn-icon B">B</span> を押して再初期化。<br>
-        <code>TEST PHRASE</code> でアラベスク冒頭が鳴るかを切り分け。<br>
+        <code>TEST TONE</code> で SD <code>/SMF/testtone.smf</code> (または簡易フレーズ) が鳴るかを切り分け。<br>
         Port A に他の I2C デバイスを併用していないかも要確認 (UART と排他)。
       </td>
     </tr>

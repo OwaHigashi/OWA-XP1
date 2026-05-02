@@ -12,7 +12,79 @@
 #include "nvs_flash.h"
 
 #include "src/hid_l2cap.h"
+#include "src/MD_MIDIFile/MD_MIDIFile.h"
 #include <Free_Fonts.h>
+
+// ---- testtone (PLAY mode) 用の型・定数を先頭に置く ----
+// 理由: Arduino auto-prototype 機構が、後に定義される static 関数の
+// プロトタイプをファイル冒頭に自動挿入する。それらは PlayToneSourceKind /
+// SmfTrackState 等を引数型に取るため、型定義がプロトタイプ挿入位置より
+// 前にないとビルドが通らない。
+enum PlayToneSourceKind {
+  PLAY_TONE_SOURCE_NONE,
+  PLAY_TONE_SOURCE_BUILTIN,
+  PLAY_TONE_SOURCE_SMF
+};
+
+struct PlayToneBuiltinStep {
+  uint8_t note;
+  uint16_t holdMs;
+  uint16_t gapMs;
+};
+
+struct SmfTrackState {
+  uint32_t startOffset;
+  uint32_t endOffset;
+  uint32_t eventOffset;
+  uint32_t nextTick;
+  uint8_t runningStatus;
+  bool finished;
+};
+
+struct PlayTonePlayerState {
+  PlayToneSourceKind source;
+  bool active;
+  uint8_t channel;
+  uint32_t nextDueMicros;
+  uint32_t tempoUsPerQuarter;
+  uint16_t division;
+  uint32_t lastTick;
+  File file;
+  char fileName[64];
+  uint8_t format;
+  uint16_t trackCount;
+  uint8_t activeTrackCount;
+  SmfTrackState tracks[16];
+  size_t builtinIndex;
+  uint32_t builtinNextDueMicros;
+  uint8_t builtinPhase;
+};
+
+static PlayTonePlayerState g_playTonePlayer;
+static constexpr const char* kSmfFolder = "/SMF";
+static constexpr const char* kPreferredSmfNames[] = {
+  "/SMF/testtone.smf",
+  "/SMF/testtone.mid",
+  "/SMF/testtone.midi",
+};
+static constexpr size_t kMaxSmfTracks = sizeof(g_playTonePlayer.tracks) / sizeof(g_playTonePlayer.tracks[0]);
+static constexpr PlayToneBuiltinStep kBuiltinPlayTone[] = {
+  { 60, 180, 40 }, { 62, 180, 40 }, { 64, 180, 40 }, { 65, 180, 40 },
+  { 67, 180, 40 }, { 69, 180, 40 }, { 71, 180, 40 }, { 72, 320, 0 },
+};
+
+// ---- SMF Player (移植: ../M5Core2-SMF-Player) 用の型・定数 ----
+enum SmfPlayState {
+  SMF_STOPPED,
+  SMF_PLAYING,
+  SMF_PAUSE,
+  SMF_WAITING,
+  SMF_ERROR
+};
+static constexpr int SMF_MAX_SONGS = 200;
+static constexpr int SMF_MAX_FILENAME = 32;
+static constexpr int SMF_TFCARD_CS_PIN = 4;
+static constexpr uint32_t SMF_SPI_SPEED_MHZ = 25;
 
 // ---- UIフォントヘルパー（GFXFFベースのきれいな描画に統一） ----
 // 旧 setTextSize(1)→Small, (2)→Medium, (3)→Large, (6)→Huge 相当
@@ -65,7 +137,8 @@ enum DisplayMode {
   KEY_MODE,
   INSTANT_MODE,
   SEQUENCE_MODE,
-  MIDI_MANAGE_MODE
+  MIDI_MANAGE_MODE,
+  SMF_PLAYER_MODE
 };
 
 enum MidiManagePage {
@@ -334,6 +407,8 @@ struct MidiMessage {
   int8_t channel;
 };
 
+// (PlayTone 系の型定義はファイル先頭に移動済み)
+
 // Forward declarations for Arduino's auto-prototype generation.
 const char* getMidiKindLabel(MidiMessageKind kind);
 bool midiKindHasChannel(MidiMessageKind kind);
@@ -390,6 +465,25 @@ void sendMidiPitchBend(uint8_t channel, uint16_t bendValue);
 void sendPlayModeInit(bool resetProgramAndVolume);
 void sendAllNotesOff(void);
 void processMIDI(void);
+void processPlayTonePlayback(void);
+
+// SMF Player 用の前方宣言
+bool smfPlayerEnsureSdInitialized();
+void smfPlayerScanSongs();
+const char* smfPlayerMakeFilename(int seq);
+void smfPlayerStartPlaying();
+void smfPlayerStopPlaying();
+void smfPlayerEnter();
+void smfPlayerExit();
+void smfPlayerProcessLoop();
+void drawSmfPlayerScreen();
+void smfPlayerMidiCallback(midi_event* pev);
+void smfPlayerSysexCallback(sysex_event* pev);
+void smfPlayerMidiSilence();
+void smfPlayerDrawKeyboardCanvas();
+void smfPlayerKeyOn(uint8_t channel, uint8_t note, uint8_t velocity);
+void smfPlayerKeyOff(uint8_t channel, uint8_t note);
+void smfPlayerClearKeyboard();
 
 // Sequence Mode用の設定
 #define SEQ_PATTERN_COUNT 16
@@ -465,6 +559,21 @@ unsigned long g_lastMidiInputAt = 0;
 char g_lastMidiRxLabel[32] = "RX:--";
 bool g_btBondSavePending = false;
 bool g_seqSavePending = false;
+
+// SMF Player の状態
+static SdFat g_smfSd;
+static MD_MIDIFile g_smf;
+static char g_smfSongList[SMF_MAX_SONGS][SMF_MAX_FILENAME];
+static int g_smfSongCount = 0;
+static int g_smfPlayIndex = 0;
+static bool g_smfSdInitialized = false;
+static SmfPlayState g_smfState = SMF_STOPPED;
+static char g_smfCurrentFilename[SMF_MAX_FILENAME] = {0};
+static const char* g_smfFolder = "/smf";  // scan 後に "/smf" か "/SMF" が入る
+// 16ch x 128 ノートのオン/オフ状態（リアルタイム鍵盤表示用）
+static uint8_t g_smfKeyState[16][128] = {{0}};
+// 鍵盤表示の差分更新用前フレームスナップショット
+static uint8_t g_smfKeyDrawn[16][128] = {{0}};
 
 // アクティブなノート追跡（88鍵盤対応）
 // 標準的な88鍵盤: A0(21) から C8(108)
@@ -1148,25 +1257,65 @@ static void showSplashScreen() {
 
   M5.Lcd.fillScreen(BLACK);
 
-  // 上下のグラデーションバー (シアン→マゼンタ)
-  for (int i = 0; i < 6; i++) {
-    uint8_t r = (uint8_t)((i * 220) / 5);
-    uint8_t g = (uint8_t)(180 - i * 28);
-    uint8_t b = (uint8_t)(255 - i * 8);
-    uint16_t c = M5.Lcd.color565(r, g, b);
-    M5.Lcd.drawFastHLine(0, 26 + i, W, c);
-    M5.Lcd.drawFastHLine(0, H - 32 + i, W, c);
+  // Phase 1: 上下のグラデーションバーを中央から左右にスイープイン (~150ms)
+  for (int step = 0; step <= W / 2; step += 10) {
+    int x0  = W / 2 - step;
+    int len = step * 2;
+    for (int i = 0; i < 6; i++) {
+      uint8_t r = (uint8_t)((i * 220) / 5);
+      uint8_t g = (uint8_t)(180 - i * 28);
+      uint8_t b = (uint8_t)(255 - i * 8);
+      uint16_t c = M5.Lcd.color565(r, g, b);
+      M5.Lcd.drawFastHLine(x0, 26 + i,      len, c);
+      M5.Lcd.drawFastHLine(x0, H - 32 + i,  len, c);
+    }
+    delay(8);
   }
-
-  // 左右の縦アクセント線
   M5.Lcd.drawFastVLine(6,     26, H - 58, M5.Lcd.color565(0, 200, 255));
   M5.Lcd.drawFastVLine(W - 7, 26, H - 58, M5.Lcd.color565(220, 0, 255));
 
-  // タイトル "OWAMIDICON" — グロー風 3 段シャドウ
+  // Phase 2: スパークル散布 (~120ms)
+  for (int n = 0; n < 110; n++) {
+    int sx = 14 + (int)random(W - 28);
+    int sy = 45 + (int)random(H - 105);
+    uint16_t c;
+    switch (n % 4) {
+      case 0:  c = CYAN; break;
+      case 1:  c = MAGENTA; break;
+      case 2:  c = WHITE; break;
+      default: c = M5.Lcd.color565(255, 200, 0); break;
+    }
+    M5.Lcd.drawPixel(sx, sy, c);
+    if ((n & 9) == 0) delay(8);
+  }
+
+  // Phase 3: タイトル "OWAMIDICON" を虹色グロー脈動 (~2000ms)
   uiFontHuge();
   M5.Lcd.setTextDatum(MC_DATUM);
   const char* title = "OWAMIDICON";
-  const int titleY = H / 2 - 22;
+  const int titleY     = H / 2 - 22;
+  const int titleBandY = titleY - 22;
+  const int titleBandH = 44;
+
+  const int pulseFrames = 50;
+  for (int p = 0; p < pulseFrames; p++) {
+    float ph = (float)p * (2.0f * 3.14159265f / pulseFrames);
+    int rr = 90 + (int)(165.0f * (sinf(ph)                        * 0.5f + 0.5f));
+    int gg = 90 + (int)(165.0f * (sinf(ph + 2.0944f /*120deg*/)   * 0.5f + 0.5f));
+    int bb = 90 + (int)(165.0f * (sinf(ph + 4.1888f /*240deg*/)   * 0.5f + 0.5f));
+
+    M5.Lcd.fillRect(0, titleBandY, W, titleBandH, BLACK);
+    M5.Lcd.setTextColor(M5.Lcd.color565(rr / 4, gg / 4, bb / 4));
+    M5.Lcd.drawString(title, W / 2 + 3, titleY + 3);
+    M5.Lcd.setTextColor(M5.Lcd.color565(rr / 2, gg / 2, bb / 2));
+    M5.Lcd.drawString(title, W / 2 + 1, titleY + 1);
+    M5.Lcd.setTextColor(M5.Lcd.color565(rr, gg, bb));
+    M5.Lcd.drawString(title, W / 2,     titleY);
+    delay(40);
+  }
+
+  // Phase 4: 最終色 (シアン) に確定し、装飾線 / サブタイトルを表示
+  M5.Lcd.fillRect(0, titleBandY, W, titleBandH, BLACK);
   M5.Lcd.setTextColor(M5.Lcd.color565(0,  30,  90));
   M5.Lcd.drawString(title, W / 2 + 3, titleY + 3);
   M5.Lcd.setTextColor(M5.Lcd.color565(0, 110, 200));
@@ -1174,34 +1323,37 @@ static void showSplashScreen() {
   M5.Lcd.setTextColor(CYAN);
   M5.Lcd.drawString(title, W / 2,     titleY);
 
-  // タイトル下の細い装飾ライン
   M5.Lcd.drawFastHLine(W / 2 - 90, titleY + 24, 180, M5.Lcd.color565(0, 180, 255));
   M5.Lcd.drawFastHLine(W / 2 - 60, titleY + 27, 120, M5.Lcd.color565(180, 0, 220));
 
-  // サブタイトル
   uiFontSmall();
   M5.Lcd.setTextColor(WHITE);
   M5.Lcd.drawString("MIDI Transposer + MIDI Message Manager", W / 2, H / 2 + 28);
-
-  // エディション表記
   M5.Lcd.setTextColor(M5.Lcd.color565(200, 80, 220));
   M5.Lcd.drawString("M5Stack Core2 Edition", W / 2, H / 2 + 50);
 
-  // 下部ローディングバーのアニメーション
+  // Phase 5: ローディングバーをゆっくり充填 + ランダムな上空スパークル (~1100ms)
   const int barX = 30;
   const int barY = H - 50;
   const int barW = W - 60;
   const int barH = 4;
   M5.Lcd.drawRect(barX - 1, barY - 1, barW + 2, barH + 2, DARKGREY);
-  for (int i = 0; i <= barW; i += 4) {
+  for (int i = 0; i <= barW; i += 2) {
     uint8_t r = (uint8_t)((i * 220) / barW);
     uint8_t b = (uint8_t)(255 - (i * 60) / barW);
     uint16_t c = M5.Lcd.color565(r, 100, b);
-    M5.Lcd.fillRect(barX + (i - 4 < 0 ? 0 : i - 4), barY, 4, barH, c);
-    delay(4);
+    M5.Lcd.fillRect(barX + (i - 2 < 0 ? 0 : i - 2), barY, 2, barH, c);
+    if ((i & 7) == 0) {
+      int sx = barX + i + (int)random(-3, 4);
+      int sy = barY - 3 - (int)random(0, 7);
+      uint16_t sc = (i & 8) ? WHITE : M5.Lcd.color565(255, 220, 120);
+      M5.Lcd.drawPixel(sx, sy, sc);
+    }
+    delay(8);
   }
 
-  delay(700);
+  // Phase 6: 最終ホールド
+  delay(500);
 }
 
 void setup() {
@@ -1294,6 +1446,8 @@ void setup() {
 
 void loop() {
   processMIDI();
+  processPlayTonePlayback();
+  smfPlayerProcessLoop();
 
   static unsigned long lastUICheck = 0;
   unsigned long now = millis();
@@ -1594,6 +1748,11 @@ void initSequenceModeButtons() {
 }
 
 void drawInterface() {
+  if (currentMode == SMF_PLAYER_MODE) {
+    drawSmfPlayerScreen();
+    return;
+  }
+
   M5.Lcd.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, BLACK);
 
   uiFontSmall();
@@ -1928,7 +2087,7 @@ void layoutPlayModeButtons() {
 
   // 3 行ステータス (y=44/60/76, 各 16px 間隔) の下に PRG 名バー (h=28)
   playProgramNameBar = { 10, 94, SCREEN_WIDTH - 20, 28 };
-  // TEST PHRASE は薄め (34 → 28)
+  // TEST TONE は薄め (34 → 28)
   playTestBtn = { 10, 192, SCREEN_WIDTH - 20, 28 };
 }
 
@@ -2063,7 +2222,7 @@ void drawPlayMode() {
                          labels[i], buttonColors[i]);
   }
 
-  drawMidiActionButton(playTestBtn.x, playTestBtn.y, playTestBtn.w, playTestBtn.h, "TEST PHRASE", ORANGE);
+  drawMidiActionButton(playTestBtn.x, playTestBtn.y, playTestBtn.w, playTestBtn.h, "TEST TONE", ORANGE);
 
   if (playProgramPickerOpen) {
     drawPlayProgramPicker();
@@ -2199,54 +2358,757 @@ void processPlayProgramPickerTouch(TouchPoint_t pos) {
   }
 }
 
-void sendPlayTestPhrase() {
-  const uint8_t channel = 0;
+static void stopPlayTonePlayback(bool sendAllNotesOffFirst) {
+  if (sendAllNotesOffFirst) {
+    sendAllNotesOff();
+  }
+  if (g_playTonePlayer.file) {
+    g_playTonePlayer.file.close();
+  }
+  g_playTonePlayer = {};
+}
 
-  Serial.printf("Play test phrase start: tx=ch%u program=%u %s\n",
-                (unsigned)(channel + 1), (unsigned)(playProgram + 1), getUnitSynthInstrumentName(playProgram));
+static void resetPlayTonePlaybackState(PlayToneSourceKind sourceKind) {
+  g_playTonePlayer = {};
+  g_playTonePlayer.source = sourceKind;
+  g_playTonePlayer.active = true;
+  g_playTonePlayer.channel = 0;
+  g_playTonePlayer.tempoUsPerQuarter = 500000;
+  g_playTonePlayer.division = 480;
+  g_playTonePlayer.nextDueMicros = micros();
+  g_playTonePlayer.lastTick = 0;
+}
 
+static void primePlayToneOutputSettings(uint8_t channel) {
   sendAllNotesOff();
-
-  // Make the test as loud and deterministic as possible.
   sendMidiControlChange(channel, 7, 127);
   sendMidiControlChange(channel, 11, 127);
   sendMidiProgramChange(channel, playProgram);
   sendMidiPitchBend(channel, 8192);
+}
 
-  // Opening of Debussy "Deux Arabesques" No. 1 (E major).
-  // Right-hand triplet melody from m.6, then the famous descending arpeggio.
-  // Each entry: { MIDI note, hold ms, gap ms after release }.
-  struct PhraseNote { uint8_t note; uint16_t holdMs; uint16_t gapMs; };
-  static const PhraseNote phrase[] = {
-    // m.6: triplet figure rising and falling around E major
-    { 76, 170, 5 }, { 78, 170, 5 }, { 80, 170, 5 },   // E5  F#5 G#5
-    { 81, 170, 5 }, { 80, 170, 5 }, { 78, 170, 5 },   // A5  G#5 F#5
-    { 80, 170, 5 }, { 78, 170, 5 }, { 76, 170, 5 },   // G#5 F#5 E5
-    { 75, 170, 5 }, { 76, 340, 30 },                  // D#5 E5(longer)
-    // m.7: characteristic descending cascade
-    { 85, 130, 0 }, { 83, 130, 0 }, { 81, 130, 0 },   // C#6 B5  A5
-    { 80, 130, 0 }, { 78, 130, 0 }, { 76, 130, 0 },   // G#5 F#5 E5
-    { 75, 130, 0 }, { 73, 260, 20 },                  // D#5 C#5
-    // soft cadence to the tonic
-    { 71, 200, 0 }, { 73, 200, 0 }, { 76, 600, 0 },   // B4  C#5 E5
-  };
-  const size_t kPhraseLen = sizeof(phrase) / sizeof(phrase[0]);
-  const uint8_t velocity = 96;
+static bool endsWithIgnoreCase(const char* value, const char* suffix);
 
-  for (size_t i = 0; i < kPhraseLen; i++) {
-    const PhraseNote& n = phrase[i];
-    Serial2.write(0x90 | channel);
-    Serial2.write(n.note);
-    Serial2.write(velocity);
-    midiOutCount += 3;
-    delay(n.holdMs);
-    Serial2.write(0x80 | channel);
-    Serial2.write(n.note);
-    Serial2.write((uint8_t)0);
-    midiOutCount += 3;
-    if (n.gapMs) delay(n.gapMs);
+static bool hasMidiExtension(const char* name) {
+  return name && (endsWithIgnoreCase(name, ".mid") || endsWithIgnoreCase(name, ".midi") || endsWithIgnoreCase(name, ".smf"));
+}
+
+static bool endsWithIgnoreCase(const char* value, const char* suffix) {
+  if (!value || !suffix) return false;
+  size_t valueLen = strlen(value);
+  size_t suffixLen = strlen(suffix);
+  if (valueLen < suffixLen) return false;
+  const char* tail = value + (valueLen - suffixLen);
+  for (size_t i = 0; i < suffixLen; i++) {
+    if (tolower((unsigned char)tail[i]) != tolower((unsigned char)suffix[i])) {
+      return false;
+    }
   }
-  Serial.println("Play test phrase done");
+  return true;
+}
+
+static bool readSmfByte(File& file, uint8_t& out) {
+  int v = file.read();
+  if (v < 0) return false;
+  out = (uint8_t)v;
+  return true;
+}
+
+static bool readSmfU16(File& file, uint16_t& out) {
+  uint8_t hi, lo;
+  if (!readSmfByte(file, hi) || !readSmfByte(file, lo)) return false;
+  out = (uint16_t)((hi << 8) | lo);
+  return true;
+}
+
+static bool readSmfU32(File& file, uint32_t& out) {
+  uint8_t b0, b1, b2, b3;
+  if (!readSmfByte(file, b0) || !readSmfByte(file, b1) || !readSmfByte(file, b2) || !readSmfByte(file, b3)) return false;
+  out = ((uint32_t)b0 << 24) | ((uint32_t)b1 << 16) | ((uint32_t)b2 << 8) | (uint32_t)b3;
+  return true;
+}
+
+static bool readSmfVlq(File& file, uint32_t& out) {
+  out = 0;
+  for (int i = 0; i < 4; i++) {
+    uint8_t b = 0;
+    if (!readSmfByte(file, b)) return false;
+    out = (out << 7) | (b & 0x7F);
+    if ((b & 0x80) == 0) return true;
+  }
+  return false;
+}
+
+static bool seekSmfOffset(File& file, uint32_t offset) {
+  return file.seek(offset);
+}
+
+static bool loadSmfTrackState(File& file, SmfTrackState& track, uint32_t startOffset, uint32_t endOffset) {
+  if (!seekSmfOffset(file, startOffset)) return false;
+  track.startOffset = startOffset;
+  track.endOffset = endOffset;
+  track.eventOffset = startOffset;
+  track.runningStatus = 0;
+  track.finished = false;
+  if (!readSmfVlq(file, track.nextTick)) return false;
+  track.eventOffset = (uint32_t)file.position();
+  return track.eventOffset < track.endOffset;
+}
+
+static SmfTrackState* findNextSmfTrack() {
+  SmfTrackState* best = nullptr;
+  for (uint8_t i = 0; i < g_playTonePlayer.activeTrackCount; i++) {
+    SmfTrackState& track = g_playTonePlayer.tracks[i];
+    if (track.finished) continue;
+    if (best == nullptr || track.nextTick < best->nextTick) {
+      best = &track;
+    }
+  }
+  return best;
+}
+
+static bool advanceSmfTrack(File& file, SmfTrackState& track) {
+  if (track.finished) return true;
+  if (track.eventOffset >= track.endOffset) {
+    track.finished = true;
+    return true;
+  }
+
+  if (!seekSmfOffset(file, track.eventOffset)) return false;
+
+  uint8_t statusOrData = 0;
+  if (!readSmfByte(file, statusOrData)) return false;
+
+  uint8_t status = statusOrData;
+  bool runningStatusUsed = false;
+  if (statusOrData < 0x80) {
+    if (track.runningStatus == 0) return false;
+    status = track.runningStatus;
+    runningStatusUsed = true;
+  } else if (status < 0xF0) {
+    track.runningStatus = status;
+  } else {
+    track.runningStatus = 0;
+  }
+
+  if (status == 0xFF) {
+    uint8_t metaType = 0;
+    uint32_t metaLen = 0;
+    if (!readSmfByte(file, metaType) || !readSmfVlq(file, metaLen)) return false;
+    if (metaType == 0x51 && metaLen >= 3) {
+      uint8_t tempoBytes[3] = {0, 0, 0};
+      for (uint8_t i = 0; i < 3; i++) {
+        if (!readSmfByte(file, tempoBytes[i])) return false;
+      }
+      g_playTonePlayer.tempoUsPerQuarter =
+        ((uint32_t)tempoBytes[0] << 16) | ((uint32_t)tempoBytes[1] << 8) | tempoBytes[2];
+      for (uint32_t i = 3; i < metaLen; i++) {
+        uint8_t discard = 0;
+        if (!readSmfByte(file, discard)) return false;
+      }
+    } else {
+      for (uint32_t i = 0; i < metaLen; i++) {
+        uint8_t discard = 0;
+        if (!readSmfByte(file, discard)) return false;
+      }
+    }
+    if (metaType == 0x2F) {
+      track.finished = true;
+    }
+  } else if (status == 0xF0 || status == 0xF7) {
+    uint32_t sysexLen = 0;
+    if (!readSmfVlq(file, sysexLen)) return false;
+    sendMIDIMessage(&status, 1);
+    for (uint32_t i = 0; i < sysexLen; i++) {
+      uint8_t b = 0;
+      if (!readSmfByte(file, b)) return false;
+      Serial2.write(b);
+      midiOutCount++;
+    }
+  } else {
+    uint8_t outBytes[3] = { status, 0, 0 };
+    uint8_t outLen = getMIDIMessageLength(status);
+    if (outLen == 0) return false;
+
+    if (outLen >= 2) {
+      if (runningStatusUsed) {
+        outBytes[1] = statusOrData;
+      } else if (!readSmfByte(file, outBytes[1])) {
+        return false;
+      }
+    }
+    if (outLen >= 3) {
+      if (!readSmfByte(file, outBytes[2])) return false;
+    }
+    sendMIDIMessage(outBytes, outLen);
+  }
+
+  if (track.finished) {
+    return true;
+  }
+
+  track.eventOffset = (uint32_t)file.position();
+  if (track.eventOffset >= track.endOffset) {
+    track.finished = true;
+    return true;
+  }
+
+  uint32_t deltaTick = 0;
+  if (!readSmfVlq(file, deltaTick)) return false;
+  track.nextTick += deltaTick;
+  track.eventOffset = (uint32_t)file.position();
+  return true;
+}
+
+static bool startSmfPlayTonePlayback() {
+  if (!ensureSDReady()) {
+    Serial.println("[PLAY] SD not ready");
+    return false;
+  }
+
+  const char* selectedPath = nullptr;
+  for (size_t i = 0; i < sizeof(kPreferredSmfNames) / sizeof(kPreferredSmfNames[0]); i++) {
+    if (SD.exists(kPreferredSmfNames[i])) {
+      selectedPath = kPreferredSmfNames[i];
+      break;
+    }
+  }
+
+  if (selectedPath == nullptr) {
+    File dir = SD.open(kSmfFolder);
+    if (dir) {
+      while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+        const char* entryName = entry.name();
+        if (entryName && hasMidiExtension(entryName)) {
+          static char discoveredPath[64];
+          if (entryName[0] == '/') {
+            strncpy(discoveredPath, entryName, sizeof(discoveredPath) - 1);
+            discoveredPath[sizeof(discoveredPath) - 1] = '\0';
+          } else {
+            snprintf(discoveredPath, sizeof(discoveredPath), "/SMF/%s", entryName);
+          }
+          selectedPath = discoveredPath;
+          entry.close();
+          break;
+        }
+        entry.close();
+      }
+      dir.close();
+    }
+  }
+
+  if (selectedPath == nullptr) {
+    return false;
+  }
+
+  File file = SD.open(selectedPath, FILE_READ);
+  if (!file) {
+    Serial.printf("[PLAY] Failed to open SMF: %s\n", selectedPath);
+    return false;
+  }
+
+  uint8_t hdrId[4];
+  if (file.read(hdrId, 4) != 4 || memcmp(hdrId, "MThd", 4) != 0) {
+    Serial.printf("[PLAY] Invalid SMF header: %s\n", selectedPath);
+    file.close();
+    return false;
+  }
+
+  uint32_t headerLen = 0;
+  uint16_t format = 0;
+  uint16_t trackCount = 0;
+  uint16_t division = 0;
+  if (!readSmfU32(file, headerLen) || !readSmfU16(file, format) ||
+      !readSmfU16(file, trackCount) || !readSmfU16(file, division)) {
+    file.close();
+    return false;
+  }
+  if (headerLen > 6) {
+    file.seek(file.position() + (headerLen - 6));
+  }
+  if (format > 1) {
+    Serial.printf("[PLAY] Unsupported SMF format %u: %s\n", (unsigned)format, selectedPath);
+    file.close();
+    return false;
+  }
+  if (division == 0 || (division & 0x8000)) {
+    Serial.printf("[PLAY] Unsupported SMF division %u: %s\n", (unsigned)division, selectedPath);
+    file.close();
+    return false;
+  }
+
+  resetPlayTonePlaybackState(PLAY_TONE_SOURCE_SMF);
+  primePlayToneOutputSettings(g_playTonePlayer.channel);
+  g_playTonePlayer.file = file;
+  strncpy(g_playTonePlayer.fileName, selectedPath, sizeof(g_playTonePlayer.fileName) - 1);
+  g_playTonePlayer.fileName[sizeof(g_playTonePlayer.fileName) - 1] = '\0';
+  g_playTonePlayer.format = (uint8_t)format;
+  g_playTonePlayer.trackCount = trackCount;
+  g_playTonePlayer.division = division;
+  g_playTonePlayer.activeTrackCount = 0;
+  g_playTonePlayer.lastTick = 0;
+  g_playTonePlayer.nextDueMicros = micros();
+
+  uint16_t tracksToLoad = (trackCount < (uint16_t)kMaxSmfTracks) ? trackCount : (uint16_t)kMaxSmfTracks;
+  for (uint16_t i = 0; i < tracksToLoad; i++) {
+    uint8_t trkId[4];
+    if (g_playTonePlayer.file.read(trkId, 4) != 4 || memcmp(trkId, "MTrk", 4) != 0) {
+      Serial.printf("[PLAY] Track header missing in %s\n", selectedPath);
+      stopPlayTonePlayback(false);
+      return false;
+    }
+
+    uint32_t trackLen = 0;
+    if (!readSmfU32(g_playTonePlayer.file, trackLen)) {
+      stopPlayTonePlayback(false);
+      return false;
+    }
+
+    uint32_t startOffset = (uint32_t)g_playTonePlayer.file.position();
+    uint32_t endOffset = startOffset + trackLen;
+    if (endOffset > (uint32_t)g_playTonePlayer.file.size()) {
+      Serial.printf("[PLAY] Track size invalid in %s\n", selectedPath);
+      stopPlayTonePlayback(false);
+      return false;
+    }
+
+    SmfTrackState& track = g_playTonePlayer.tracks[g_playTonePlayer.activeTrackCount];
+    if (!loadSmfTrackState(g_playTonePlayer.file, track, startOffset, endOffset)) {
+      stopPlayTonePlayback(false);
+      return false;
+    }
+    g_playTonePlayer.activeTrackCount++;
+    g_playTonePlayer.file.seek(endOffset);
+  }
+
+  if (g_playTonePlayer.activeTrackCount == 0) {
+    Serial.printf("[PLAY] No tracks to play in %s\n", selectedPath);
+    stopPlayTonePlayback(false);
+    return false;
+  }
+
+  Serial.printf("[PLAY] SMF loaded: %s (format=%u tracks=%u division=%u)\n",
+                g_playTonePlayer.fileName, (unsigned)g_playTonePlayer.format,
+                (unsigned)g_playTonePlayer.activeTrackCount, (unsigned)g_playTonePlayer.division);
+  return true;
+}
+
+static void startBuiltinPlayTonePlayback() {
+  resetPlayTonePlaybackState(PLAY_TONE_SOURCE_BUILTIN);
+  primePlayToneOutputSettings(g_playTonePlayer.channel);
+  g_playTonePlayer.builtinIndex = 0;
+  g_playTonePlayer.builtinPhase = 0;
+  g_playTonePlayer.builtinNextDueMicros = micros();
+  Serial.println("[PLAY] Builtin CDEFGABC test tone started");
+}
+
+void sendPlayTestPhrase() {
+  const uint8_t channel = 0;
+  Serial.printf("Play test tone start: tx=ch%u program=%u %s\n",
+                (unsigned)(channel + 1), (unsigned)(playProgram + 1), getUnitSynthInstrumentName(playProgram));
+
+  stopPlayTonePlayback(false);
+
+  if (!startSmfPlayTonePlayback()) {
+    startBuiltinPlayTonePlayback();
+  }
+}
+
+static void processBuiltinPlayTonePlayback() {
+  if (!g_playTonePlayer.active) return;
+  const uint32_t now = micros();
+  while (g_playTonePlayer.builtinIndex < (sizeof(kBuiltinPlayTone) / sizeof(kBuiltinPlayTone[0]))) {
+    const PlayToneBuiltinStep& step = kBuiltinPlayTone[g_playTonePlayer.builtinIndex];
+    if (g_playTonePlayer.builtinPhase == 0) {
+      if ((int32_t)(now - g_playTonePlayer.builtinNextDueMicros) < 0) break;
+      uint8_t noteOn[3] = { (uint8_t)(0x90 | g_playTonePlayer.channel), step.note, 96 };
+      sendMIDIMessage(noteOn, 3);
+      g_playTonePlayer.builtinPhase = 1;
+      g_playTonePlayer.builtinNextDueMicros = now + (uint32_t)step.holdMs * 1000UL;
+      break;
+    }
+
+    if ((int32_t)(now - g_playTonePlayer.builtinNextDueMicros) < 0) break;
+    uint8_t noteOff[3] = { (uint8_t)(0x80 | g_playTonePlayer.channel), step.note, 0 };
+    sendMIDIMessage(noteOff, 3);
+    g_playTonePlayer.builtinIndex++;
+    g_playTonePlayer.builtinPhase = 0;
+    g_playTonePlayer.builtinNextDueMicros = now + (uint32_t)step.gapMs * 1000UL;
+  }
+
+  if (g_playTonePlayer.builtinIndex >= (sizeof(kBuiltinPlayTone) / sizeof(kBuiltinPlayTone[0]))) {
+    Serial.println("[PLAY] Builtin test tone done");
+    stopPlayTonePlayback(false);
+  }
+}
+
+static void processSmfPlayTonePlayback() {
+  if (!g_playTonePlayer.active || g_playTonePlayer.source != PLAY_TONE_SOURCE_SMF) return;
+
+  const uint32_t now = micros();
+  while (true) {
+    SmfTrackState* track = findNextSmfTrack();
+    if (track == nullptr) {
+      Serial.println("[PLAY] SMF playback done");
+      stopPlayTonePlayback(false);
+      return;
+    }
+
+    if (track->nextTick > g_playTonePlayer.lastTick) {
+      uint32_t tickDelta = track->nextTick - g_playTonePlayer.lastTick;
+      uint64_t deltaUs = ((uint64_t)tickDelta * (uint64_t)g_playTonePlayer.tempoUsPerQuarter) / (uint64_t)g_playTonePlayer.division;
+      g_playTonePlayer.nextDueMicros += (uint32_t)deltaUs;
+      g_playTonePlayer.lastTick = track->nextTick;
+    }
+
+    if ((int32_t)(now - g_playTonePlayer.nextDueMicros) < 0) {
+      return;
+    }
+
+    if (!advanceSmfTrack(g_playTonePlayer.file, *track)) {
+      Serial.println("[PLAY] SMF playback error");
+      stopPlayTonePlayback(true);
+      return;
+    }
+  }
+}
+
+void processPlayTonePlayback(void) {
+  if (!g_playTonePlayer.active) return;
+  if (g_playTonePlayer.source == PLAY_TONE_SOURCE_BUILTIN) {
+    processBuiltinPlayTonePlayback();
+  } else if (g_playTonePlayer.source == PLAY_TONE_SOURCE_SMF) {
+    processSmfPlayTonePlayback();
+  }
+}
+
+// ---------------------------------------------------------------------
+// SMF Player (../M5Core2-SMF-Player をそのまま移植 + リアルタイム鍵盤
+// 表示。MD_MIDIFile ライブラリは src/MD_MIDIFile/ に同梱)
+// ---------------------------------------------------------------------
+
+static const uint8_t kSmfWhiteOffset[12] = { 0, 2, 4, 6, 8, 12, 14, 16, 18, 20, 22, 24 };
+static const bool    kSmfNoteIsBlack[12] = { false, true, false, true, false, false, true, false, true, false, true, false };
+
+void smfPlayerKeyOn(uint8_t channel, uint8_t note, uint8_t velocity) {
+  if (channel >= 16 || note >= 128) return;
+  g_smfKeyState[channel][note] = (velocity == 0) ? 0 : velocity;
+}
+
+void smfPlayerKeyOff(uint8_t channel, uint8_t note) {
+  if (channel >= 16 || note >= 128) return;
+  g_smfKeyState[channel][note] = 0;
+}
+
+void smfPlayerClearKeyboard() {
+  memset(g_smfKeyState, 0, sizeof(g_smfKeyState));
+}
+
+bool smfPlayerEnsureSdInitialized() {
+  if (g_smfSdInitialized) return true;
+  // SD.h が既に SPI バスを掴んでいるので一旦 end して SdFat に渡す。
+  // SMF を抜けるときに SD.h を再 begin して元の状態に戻す。
+  SD.end();
+  delay(20);
+  SdSpiConfig cfg(SMF_TFCARD_CS_PIN, SHARED_SPI, SD_SCK_MHZ(SMF_SPI_SPEED_MHZ));
+  if (!g_smfSd.begin(cfg)) {
+    Serial.println("[SMF] SdFat init failed");
+    // SD.h を戻す
+    SD.begin(SMF_TFCARD_CS_PIN, SPI, 25000000);
+    return false;
+  }
+  g_smfSdInitialized = true;
+  Serial.println("[SMF] SdFat initialized");
+  return true;
+}
+
+void smfPlayerScanSongs() {
+  g_smfSongCount = 0;
+  if (!smfPlayerEnsureSdInitialized()) return;
+
+  // /smf と /SMF の両方を試す
+  static const char* kSmfFolderCandidates[] = { "/smf", "/SMF" };
+  FsFile root;
+  const char* foundFolder = nullptr;
+  for (size_t i = 0; i < sizeof(kSmfFolderCandidates) / sizeof(kSmfFolderCandidates[0]); i++) {
+    root = g_smfSd.open(kSmfFolderCandidates[i]);
+    if (root && root.isDirectory()) {
+      foundFolder = kSmfFolderCandidates[i];
+      break;
+    }
+    if (root) root.close();
+  }
+  if (!foundFolder) {
+    Serial.println("[SMF] /smf or /SMF folder not found. Listing root:");
+    FsFile rootList = g_smfSd.open("/");
+    if (rootList && rootList.isDirectory()) {
+      FsFile e;
+      int n = 0;
+      while (e.openNext(&rootList, O_RDONLY) && n < 50) {
+        char nm[64];
+        e.getName(nm, sizeof(nm));
+        Serial.printf("[SMF]   root: %s%s\n", nm, e.isDir() ? "/" : "");
+        e.close();
+        n++;
+      }
+      rootList.close();
+    } else {
+      Serial.println("[SMF] cannot open / on SdFat side");
+    }
+    return;
+  }
+  g_smfFolder = foundFolder;
+  Serial.printf("[SMF] Scanning %s\n", foundFolder);
+  FsFile entry;
+  while (entry.openNext(&root, O_RDONLY)) {
+    if (!entry.isDir()) {
+      char filename[SMF_MAX_FILENAME];
+      entry.getName(filename, sizeof(filename));
+      String fn(filename);
+      if (fn.endsWith(".mid") || fn.endsWith(".MID") ||
+          fn.endsWith(".smf") || fn.endsWith(".SMF")) {
+        strncpy(g_smfSongList[g_smfSongCount], filename, SMF_MAX_FILENAME);
+        g_smfSongList[g_smfSongCount][SMF_MAX_FILENAME - 1] = '\0';
+        Serial.printf("[SMF] %2d: %s\n", g_smfSongCount, filename);
+        g_smfSongCount++;
+        if (g_smfSongCount >= SMF_MAX_SONGS) { entry.close(); break; }
+      }
+    }
+    entry.close();
+  }
+  root.close();
+  Serial.printf("[SMF] %d song(s) found\n", g_smfSongCount);
+}
+
+const char* smfPlayerMakeFilename(int seq) {
+  if (g_smfSongCount == 0) return nullptr;
+  g_smfPlayIndex += seq;
+  if (g_smfPlayIndex >= g_smfSongCount) g_smfPlayIndex = 0;
+  if (g_smfPlayIndex < 0) g_smfPlayIndex = g_smfSongCount - 1;
+  return g_smfSongList[g_smfPlayIndex];
+}
+
+void smfPlayerMidiCallback(midi_event* pev) {
+  if (!pev || pev->size == 0) return;
+  uint8_t status = pev->data[0];
+  if (status >= 0x80 && status <= 0xE0) {
+    Serial2.write((uint8_t)(status | pev->channel));
+    if (pev->size > 1) Serial2.write(&pev->data[1], pev->size - 1);
+    midiOutCount += pev->size;
+
+    uint8_t high = status & 0xF0;
+    uint8_t ch = pev->channel & 0x0F;
+    if (high == 0x90 && pev->size >= 3) {
+      uint8_t note = pev->data[1] & 0x7F;
+      uint8_t vel  = pev->data[2] & 0x7F;
+      if (vel > 0) smfPlayerKeyOn(ch, note, vel);
+      else         smfPlayerKeyOff(ch, note);
+    } else if (high == 0x80 && pev->size >= 2) {
+      smfPlayerKeyOff(ch, pev->data[1] & 0x7F);
+    }
+  } else {
+    Serial2.write(pev->data, pev->size);
+    midiOutCount += pev->size;
+  }
+}
+
+void smfPlayerSysexCallback(sysex_event* pev) {
+  if (!pev || pev->size == 0) return;
+  Serial2.write(pev->data, pev->size);
+  midiOutCount += pev->size;
+}
+
+void smfPlayerMidiSilence() {
+  for (uint8_t ch = 0; ch < 16; ch++) {
+    Serial2.write((uint8_t)(0xB0 | ch));
+    Serial2.write((uint8_t)123);  // All Notes Off
+    Serial2.write((uint8_t)0);
+  }
+  smfPlayerClearKeyboard();
+}
+
+void smfPlayerDrawKeyboardCanvas() {
+  const uint16_t SEP_COLOR = 0xF660;
+  M5.Lcd.setTextFont(0);
+  for (int chd = 1; chd <= 16; chd++) {
+    int y = 49 + chd * 10;
+    M5.Lcd.setTextColor(WHITE, BLACK);
+    M5.Lcd.drawNumber(chd, 4, y + 1, 1);
+    M5.Lcd.drawFastHLine(2, y - 1, 316, SEP_COLOR);
+    M5.Lcd.fillRect(18, y, 300, 9, TFT_DARKGREY);
+    for (int oct = 0; oct < 11; ++oct) {
+      int x = 18 + oct * 28;
+      for (int n = 0; n < 7; ++n) {
+        M5.Lcd.drawFastVLine(x + n * 4 + 3, y, 9, TFT_BLACK);
+      }
+      M5.Lcd.fillRect(x + 2,  y, 3, 5, TFT_BLACK);
+      M5.Lcd.fillRect(x + 6,  y, 3, 5, TFT_BLACK);
+      M5.Lcd.fillRect(x + 14, y, 3, 5, TFT_BLACK);
+      M5.Lcd.fillRect(x + 18, y, 3, 5, TFT_BLACK);
+      M5.Lcd.fillRect(x + 22, y, 3, 5, TFT_BLACK);
+    }
+  }
+  M5.Lcd.drawFastVLine(16, 58, 161, SEP_COLOR);
+  M5.Lcd.drawRect(1, 58, 318, 161, SEP_COLOR);
+}
+
+// 16ch x 128ノートの差分更新。前フレームと比較し、状態が変わった
+// ノートだけ再描画する。
+void smfPlayerUpdateKeyboardIncremental() {
+  for (int ch = 0; ch < 16; ch++) {
+    int y = 49 + (ch + 1) * 10;
+    for (int n = 0; n < 128; n++) {
+      uint8_t cur = g_smfKeyState[ch][n];
+      uint8_t prv = g_smfKeyDrawn[ch][n];
+      bool curOn = (cur != 0);
+      bool prvOn = (prv != 0);
+      if (curOn == prvOn) continue;
+
+      int oct = n / 12;
+      int idx = n % 12;
+      if (oct >= 11) { g_smfKeyDrawn[ch][n] = cur; continue; }
+      int kx  = 18 + oct * 28 + kSmfWhiteOffset[idx];
+      bool blk = kSmfNoteIsBlack[idx];
+
+      if (curOn) {
+        if (blk) {
+          M5.Lcd.fillRect(kx, y, 3, 5, ORANGE);
+        } else {
+          M5.Lcd.fillRect(kx, y + 5, 3, 4, GREEN);
+        }
+      } else {
+        if (blk) {
+          M5.Lcd.fillRect(kx, y, 3, 5, TFT_BLACK);
+        } else {
+          M5.Lcd.fillRect(kx, y + 5, 3, 4, TFT_DARKGREY);
+          M5.Lcd.drawFastVLine(kx + 3, y, 9, TFT_BLACK);
+        }
+      }
+      g_smfKeyDrawn[ch][n] = cur;
+    }
+  }
+}
+
+void drawSmfPlayerScreen() {
+  M5.Lcd.fillScreen(TFT_BLACK);
+  smfPlayerDrawKeyboardCanvas();
+
+  M5.Lcd.setTextFont(4);
+  M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Lcd.setCursor(5, 0);
+  if (g_smfCurrentFilename[0]) M5.Lcd.println(g_smfCurrentFilename);
+  else                          M5.Lcd.println("(no song)");
+
+  M5.Lcd.setCursor(5, 27);
+  M5.Lcd.print("Status:");
+  switch (g_smfState) {
+    case SMF_ERROR:
+      M5.Lcd.println(" load error");
+      break;
+    case SMF_STOPPED:
+      M5.Lcd.println(" stop");
+      M5.Lcd.fillRect(260, 5, 40, 40, TFT_WHITE);
+      break;
+    case SMF_PLAYING:
+      M5.Lcd.println(" playing");
+      M5.Lcd.fillRect(280, 5, 30, 40, TFT_BLACK);
+      M5.Lcd.fillTriangle(280, 5, 280, 45, 310, 25, TFT_YELLOW);
+      break;
+    case SMF_PAUSE:   M5.Lcd.println(" pause"); break;
+    case SMF_WAITING: M5.Lcd.println(" wait");  break;
+    default: break;
+  }
+
+  // 次フレームで全ノート再評価させるためにキャッシュをクリア
+  memset(g_smfKeyDrawn, 0, sizeof(g_smfKeyDrawn));
+}
+
+void smfPlayerStartPlaying() {
+  if (g_smfSongCount == 0 || g_smfCurrentFilename[0] == 0) {
+    g_smfState = SMF_ERROR;
+    drawSmfPlayerScreen();
+    return;
+  }
+  char filepath[256];
+  snprintf(filepath, sizeof(filepath), "%s/%s", g_smfFolder, g_smfCurrentFilename);
+  Serial.printf("[SMF] Loading %s\n", filepath);
+
+  int err = g_smf.load(filepath);
+  if (err != MD_MIDIFile::E_OK) {
+    Serial.printf("[SMF] load failed: %d\n", err);
+    g_smfState = SMF_ERROR;
+    drawSmfPlayerScreen();
+    return;
+  }
+  g_smf.setMidiHandler(smfPlayerMidiCallback);
+  g_smf.setSysexHandler(smfPlayerSysexCallback);
+  g_smfState = SMF_PLAYING;
+  drawSmfPlayerScreen();
+  Serial.printf("[SMF] Playing %s\n", g_smfCurrentFilename);
+}
+
+void smfPlayerStopPlaying() {
+  if (g_smfState == SMF_PLAYING) {
+    g_smf.close();
+    smfPlayerMidiSilence();
+    g_smfState = SMF_STOPPED;
+    Serial.println("[SMF] Stopped");
+  }
+  drawSmfPlayerScreen();
+}
+
+void smfPlayerEnter() {
+  sendAllNotesOff();
+  smfPlayerClearKeyboard();
+  if (g_smfSongCount == 0) {
+    smfPlayerScanSongs();
+    if (g_smfSongCount > 0) {
+      g_smfPlayIndex = 0;
+      strncpy(g_smfCurrentFilename, g_smfSongList[0], SMF_MAX_FILENAME);
+      g_smfCurrentFilename[SMF_MAX_FILENAME - 1] = '\0';
+    } else {
+      g_smfCurrentFilename[0] = '\0';
+    }
+  }
+  g_smfState = SMF_STOPPED;
+}
+
+void smfPlayerExit() {
+  if (g_smfState == SMF_PLAYING) smfPlayerStopPlaying();
+  else                           smfPlayerMidiSilence();
+  // SdFat を解放し SD.h を再初期化（他機能が SD.h で SD カードへ書き戻すため）
+  if (g_smfSdInitialized) {
+    g_smfSd.end();
+    g_smfSdInitialized = false;
+    g_smfSongCount = 0;  // 次回入室時に再スキャン
+    delay(20);
+    SD.begin(SMF_TFCARD_CS_PIN, SPI, 25000000);
+    Serial.println("[SMF] released SdFat, restored SD.h");
+  }
+}
+
+void smfPlayerProcessLoop() {
+  if (currentMode != SMF_PLAYER_MODE) return;
+
+  if (g_smfState == SMF_PLAYING) {
+    if (!g_smf.isEOF()) {
+      g_smf.getNextEvent();
+    } else {
+      // 自動で次曲へ
+      smfPlayerStopPlaying();
+      const char* nx = smfPlayerMakeFilename(1);
+      if (nx) {
+        strncpy(g_smfCurrentFilename, nx, SMF_MAX_FILENAME);
+        g_smfCurrentFilename[SMF_MAX_FILENAME - 1] = '\0';
+        smfPlayerStartPlaying();
+      }
+    }
+  }
+
+  // 鍵盤の差分更新
+  smfPlayerUpdateKeyboardIncremental();
 }
 
 void drawMidiRuleListBox(int x, int y, int w, int h, bool selected) {
@@ -2648,6 +3510,8 @@ void enterDisplayMode(int newMode) {
     selectedMinorKey = -1;
   } else if (currentMode == SEQUENCE_MODE) {
     handleTransposeChange(seqPatterns[seqCurrentPattern][seqCurrentStep]);
+  } else if (currentMode == SMF_PLAYER_MODE) {
+    smfPlayerEnter();
   }
 
   if (isTransposeDisplayMode(currentMode)) {
@@ -2698,8 +3562,7 @@ void advanceSubMode() {
   else if (currentMode == INSTANT_MODE) enterDisplayMode(SEQUENCE_MODE);
   else enterDisplayMode(DIRECT_MODE);
 
-  const char* modeNames[] = {"DIRECT", "KEY", "INSTANT", "SEQUENCE"};
-  Serial.printf("Transpose mode: %s\n", modeNames[currentMode]);
+  Serial.printf("Transpose mode: %s\n", getDisplayModeLabel(currentMode));
 }
 
 void processHardwareButtons() {
@@ -3281,6 +4144,7 @@ const char* getDisplayModeLabel(DisplayMode mode) {
     case INSTANT_MODE: return "INSTANT";
     case SEQUENCE_MODE: return "SEQUENCE";
     case MIDI_MANAGE_MODE: return "MIDI_MANAGER";
+    case SMF_PLAYER_MODE: return "SMF_PLAYER";
     default: return "UNKNOWN";
   }
 }
@@ -3319,12 +4183,38 @@ bool parseIntValue(const char* token, int& outValue) {
 }
 
 void handleButtonAAction() {
+  if (currentMode == SMF_PLAYER_MODE) {
+    // 前の曲へ。再生中なら止めてから次の曲を再生、停止中ならファイル選択のみ。
+    if (g_smfState == SMF_PLAYING) {
+      smfPlayerStopPlaying();
+      const char* nx = smfPlayerMakeFilename(-1);
+      if (nx) {
+        strncpy(g_smfCurrentFilename, nx, SMF_MAX_FILENAME);
+        g_smfCurrentFilename[SMF_MAX_FILENAME - 1] = '\0';
+      }
+      smfPlayerStartPlaying();
+    } else {
+      const char* nx = smfPlayerMakeFilename(-1);
+      if (nx) {
+        strncpy(g_smfCurrentFilename, nx, SMF_MAX_FILENAME);
+        g_smfCurrentFilename[SMF_MAX_FILENAME - 1] = '\0';
+      }
+      drawSmfPlayerScreen();
+    }
+    return;
+  }
   allNotesOffEnabled = !allNotesOffEnabled;
   needFullRedraw = true;
   Serial.printf("All Notes Off: %s\n", allNotesOffEnabled ? "ON" : "OFF");
 }
 
 void handleButtonBAction() {
+  if (currentMode == SMF_PLAYER_MODE) {
+    // 再生・停止トグル
+    if (g_smfState == SMF_PLAYING) smfPlayerStopPlaying();
+    else                            smfPlayerStartPlaying();
+    return;
+  }
   if (currentMode == PLAY_MODE) {
     sendPlayModeInit(true);
     needFullRedraw = true;
@@ -3368,15 +4258,42 @@ void handleButtonBAction() {
 
 void handleButtonCShortAction() {
   if (currentMode == PLAY_MODE) {
-    sendAllNotesOff();
-    needFullRedraw = true;
-    Serial.println("Play mode panic");
+    // PLAY モードからは SMF Player へ入る
+    enterDisplayMode(SMF_PLAYER_MODE);
+    Serial.println("Enter SMF Player");
+    return;
+  }
+  if (currentMode == SMF_PLAYER_MODE) {
+    // 次曲へ（再生中なら止めてから次再生、停止中ならファイル選択のみ）
+    if (g_smfState == SMF_PLAYING) {
+      smfPlayerStopPlaying();
+      const char* nx = smfPlayerMakeFilename(1);
+      if (nx) {
+        strncpy(g_smfCurrentFilename, nx, SMF_MAX_FILENAME);
+        g_smfCurrentFilename[SMF_MAX_FILENAME - 1] = '\0';
+      }
+      smfPlayerStartPlaying();
+    } else {
+      const char* nx = smfPlayerMakeFilename(1);
+      if (nx) {
+        strncpy(g_smfCurrentFilename, nx, SMF_MAX_FILENAME);
+        g_smfCurrentFilename[SMF_MAX_FILENAME - 1] = '\0';
+      }
+      drawSmfPlayerScreen();
+    }
     return;
   }
   advanceSubMode();
 }
 
 void handleButtonCLongAction() {
+  if (currentMode == SMF_PLAYER_MODE) {
+    // SMF モードからは長押しで PLAY に戻る
+    smfPlayerExit();
+    enterDisplayMode(PLAY_MODE);
+    Serial.println("Leave SMF Player -> PLAY");
+    return;
+  }
   advanceDisplayMode();
 }
 
@@ -3392,6 +4309,9 @@ void dispatchTouchPoint(TouchPoint_t pos) {
     processInstantModeTouch(pos);
   } else if (currentMode == SEQUENCE_MODE) {
     processSequenceModeTouch(pos);
+  } else if (currentMode == SMF_PLAYER_MODE) {
+    // SMF Player はタッチ操作なし（A/B/C ボタンで操作）
+    (void)pos;
   } else {
     processMidiManageTouch(pos);
   }
