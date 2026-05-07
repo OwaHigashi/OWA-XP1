@@ -1506,6 +1506,26 @@ void loop() {
       showBTOverlay("BT Paired!", BLUE, 1500);
     }
 
+    // Stack detected a stale stored link key (HCI auth/key error). The
+    // per-peer NVS bond was already removed inside hid_l2cap.cpp; here
+    // we drop the SD-side copy too, otherwise restoreBTBondFromSD would
+    // resurrect the bad key on the next boot. The retry loop above will
+    // re-issue L2CA_CONNECT_REQ on its own, which now goes through fresh
+    // Just-Works SSP and re-bonds.
+    if (hid_l2cap_consume_stale_bond_flag()) {
+      Serial.println("[BT_BOND] Stale bond detected - clearing SD /bt_bond.dat");
+      if (SD.cardType() != CARD_NONE && SD.exists(BT_BOND_FILE)) {
+        if (SD.remove(BT_BOND_FILE)) {
+          Serial.println("[BT_BOND] /bt_bond.dat removed");
+        } else {
+          Serial.println("[BT_BOND] /bt_bond.dat remove failed");
+        }
+      }
+      g_btBondSaved = false;
+      g_btConnectedSince = 0;
+      showBTOverlay("Re-pairing...", YELLOW, 2000);
+    }
+
     // BT接続安定後（3秒）にボンド情報をSDに保存
     if (status == BT_CONNECTED) {
       if (g_btConnectedSince == 0) {
@@ -4463,6 +4483,7 @@ void printUsbSerialHelp() {
   Serial.println("MODE PLAY|DIRECT|KEY|INSTANT|SEQUENCE|FILTER|MAPPER|MIDI");
   Serial.println("GROUP PLAY|TRANSPOSE|MIDI");
   Serial.println("SET TRANSPOSE <-11..11>");
+  Serial.println("BT FORGET");
   Serial.println("SCREENSHOT [PPM|RGB888]");
   Serial.println("INFO SCREEN");
   Serial.println("OK HELP END");
@@ -4663,6 +4684,55 @@ void handleUsbSerialCommand(char* line) {
       return;
     }
     Serial.println("ERR SET supports only TRANSPOSE");
+    return;
+  }
+
+  // BT FORGET: clear the classic-BT bond from NVS (bt_config.conf) and
+  // delete /bt_bond.dat on SD, then reboot. Use this when the pedal has
+  // been re-paired with another host and Core2's stored link key no
+  // longer matches — the pedal pages back but auth fails (result=5 in
+  // hid_l2cap_connect_cfm_cback). After this command + reboot, NVS has
+  // no bond for the pedal so the next page-and-wake of the pedal goes
+  // through Just-Works SSP and a fresh bond is generated. Note: the
+  // stack now also auto-recovers from this state at runtime via
+  // hid_l2cap_consume_stale_bond_flag(); BT FORGET remains as a manual
+  // override / known-state reset.
+  if (tokenEqualsIgnoreCase(command, "BT")) {
+    char* sub = strtok_r(nullptr, " \t", &savePtr);
+    if (sub == nullptr || !tokenEqualsIgnoreCase(sub, "FORGET")) {
+      Serial.println("ERR BT subcommand: FORGET");
+      return;
+    }
+    Serial.println("[BT_FORGET] Erasing NVS namespace bt_config.conf ...");
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_BT_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err == ESP_OK) {
+      err = nvs_erase_all(nvs);
+      if (err == ESP_OK) {
+        nvs_commit(nvs);
+        Serial.println("[BT_FORGET] NVS bond cleared");
+      } else {
+        Serial.printf("[BT_FORGET] nvs_erase_all failed: 0x%x\n", err);
+      }
+      nvs_close(nvs);
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+      Serial.println("[BT_FORGET] NVS namespace not present (already clean)");
+    } else {
+      Serial.printf("[BT_FORGET] nvs_open failed: 0x%x\n", err);
+    }
+    if (SD.cardType() != CARD_NONE && SD.exists(BT_BOND_FILE)) {
+      if (SD.remove(BT_BOND_FILE)) {
+        Serial.println("[BT_FORGET] /bt_bond.dat removed from SD");
+      } else {
+        Serial.println("[BT_FORGET] /bt_bond.dat remove failed");
+      }
+    } else {
+      Serial.println("[BT_FORGET] /bt_bond.dat not present on SD");
+    }
+    Serial.println("OK BT FORGET — restarting in 1s for fresh pair");
+    Serial.flush();
+    delay(1000);
+    ESP.restart();
     return;
   }
 

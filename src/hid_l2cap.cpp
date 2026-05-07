@@ -33,6 +33,25 @@ static BT_STATUS is_connected = BT_UNINITIALIZED;
 static BD_ADDR g_bd_addr;
 static HID_L2CAP_CALLBACK g_callback;
 static volatile bool g_auth_completed = false;
+static volatile bool g_stale_bond_detected = false;
+
+// Drop the NVS link key for g_bd_addr and raise the stale-bond flag for
+// the .ino layer. Used when the stack tells us the stored bond no longer
+// authenticates with the peer (HCI 0x05 / 0x06, or AUTH_CMPL stat != 0).
+// Without this, retrying L2CAP connect just keeps re-presenting the same
+// bad key forever.
+static void hid_l2cap_drop_stale_bond(const uint8_t *peer)
+{
+  esp_bd_addr_t addr;
+  memcpy(addr, peer, sizeof(esp_bd_addr_t));
+  esp_err_t err = esp_bt_gap_remove_bond_device(addr);
+  if (err == ESP_OK) {
+    HID_LOGLN("[BT_GAP] stale NVS bond removed; next attempt will pair fresh");
+  } else {
+    HID_LOGF("[BT_GAP] esp_bt_gap_remove_bond_device failed: 0x%x\n", err);
+  }
+  g_stale_bond_detected = true;
+}
 
 // GAP callback for handling SSP (Secure Simple Pairing) events
 static void bt_gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
@@ -45,7 +64,8 @@ static void bt_gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
         g_auth_completed = true;
         HID_LOGLN("[BT_GAP] Authentication successful - bond info should be in NVS");
       } else {
-        HID_LOGLN("[BT_GAP] Authentication failed");
+        HID_LOGLN("[BT_GAP] Authentication failed - dropping stale bond");
+        hid_l2cap_drop_stale_bond(param->auth_cmpl.bda);
       }
       break;
 
@@ -145,6 +165,15 @@ bool hid_l2cap_auth_completed(void)
   return false;
 }
 
+bool hid_l2cap_consume_stale_bond_flag(void)
+{
+  if (g_stale_bond_detected) {
+    g_stale_bond_detected = false;
+    return true;
+  }
+  return false;
+}
+
 long hid_l2cap_reconnect(void)
 {
   long ret;
@@ -221,6 +250,19 @@ long hid_l2cap_initialize(HID_L2CAP_CALLBACK callback)
 static void hid_l2cap_connect_cfm_cback(uint16_t l2cap_cid, uint16_t result)
 {
   HID_LOGF("[%s] l2cap_cid: 0x%02x\n  result: %d\n", __func__, l2cap_cid, result );
+
+  // result == 5 (HCI_ERR_AUTH_FAILURE) or 6 (HCI_ERR_KEY_MISSING) means
+  // the stored link key for g_bd_addr no longer matches what the peer
+  // expects (peer was re-paired with another host, or its bond store was
+  // wiped). Retrying with the same NVS key fails forever; drop it so the
+  // next L2CA_CONNECT_REQ falls back to fresh Just-Works SSP. The .ino
+  // side is expected to also delete /bt_bond.dat via the
+  // hid_l2cap_consume_stale_bond_flag() poll so the SD copy doesn't
+  // resurrect the bad key on the next boot.
+  if (result == 5 || result == 6) {
+    HID_LOGF("[%s] stale link key (result=%d) — auto-forgetting bond\n", __func__, result);
+    hid_l2cap_drop_stale_bond(g_bd_addr);
+  }
 }
 
 static void hid_l2cap_config_cfm_cback(uint16_t l2cap_cid, tL2CAP_CFG_INFO *p_cfg)
