@@ -3656,9 +3656,13 @@ void processHardwareButtons() {
 
     needFullRedraw = true;
     lastButtonCheck = now;
-    const char* modeNames[] = {"DIRECT", "KEY", "INSTANT", "SEQUENCE"};
+    // enum DisplayMode has 7 entries (PLAY/DIRECT/KEY/INSTANT/SEQUENCE/
+    // MIDI_MANAGE/SMF_PLAYER); the prior 4-entry modeNames[] indexed by
+    // currentMode read out-of-bounds for SEQUENCE_MODE (index 4) and beyond,
+    // returning a stack-garbage pointer that printf would then walk as a
+    // C string. Use the existing helper that switches over every enum value.
     Serial.printf("Mode: %s, Transpose: %d (maintained)\n",
-                  modeNames[currentMode], transposeValue);
+                  getDisplayModeLabel(currentMode), transposeValue);
   }
 }
 
