@@ -1380,9 +1380,15 @@ void setup() {
   // (Touch / AXP / IMU live on the internal Wire1 bus on G21/G22 and are unaffected.)
   Wire.end();
 
+  // setRxBufferSize / setTxBufferSize must run BEFORE begin() — arduino-esp32
+  // early-returns once the UART driver is installed (HardwareSerial.cpp::
+  // setTxBufferSize: `if (_uart) return 0;`). Calling them after begin()
+  // silently no-ops, leaving Serial2 with no TX ring (just the ~128-byte
+  // hardware FIFO). Sustained MIDI input then overflows the FIFO and
+  // Serial2.write() blocks, starving the loop until the WDT resets the device.
+  Serial2.setRxBufferSize(2048);
+  Serial2.setTxBufferSize(4096);
   Serial2.begin(MIDI_UART_BAUD, SERIAL_8N1, MIDI_UART_RX_PIN, MIDI_UART_TX_PIN);
-  Serial2.setRxBufferSize(1024);
-  Serial2.setTxBufferSize(512);
   Serial2.setTimeout(10);
   // Per M5Unit-Synth: pull-up RX so the line does not float when Unit MIDI is idle.
   pinMode(MIDI_UART_RX_PIN, INPUT_PULLUP);
@@ -4832,8 +4838,16 @@ void sendPlayModeInit(bool resetProgramAndVolume) {
 }
 
 void processMIDI() {
+  // Cap the work done per loop iteration. Sustained MIDI bursts can outpace
+  // 31.25 kbaud TX, and Serial2.write() blocks once the TX ring is full.
+  // Without a budget the loop never returns to M5.update() / IDLE / WDT feed
+  // and the device resets. Unconsumed bytes stay in the Serial2 RX ring and
+  // are picked up on the next iteration.
+  const uint32_t startUs = micros();
+  const uint32_t kBudgetUs = 3000UL;
   bool sawInput = false;
   while (Serial2.available()) {
+    if ((micros() - startUs) >= kBudgetUs) break;
     uint8_t incomingByte = Serial2.read();
     sawInput = true;
     midiInCount++;
@@ -4918,14 +4932,29 @@ void processMIDIByte(uint8_t midiData) {
   }
 
   if (inSysEx) {
-    if (allowCurrentSysEx) {
-      Serial2.write(midiData);
-      midiOutCount++;
-    }
-    if (midiData == 0xF7) {
+    // Defensive: a non-realtime status byte during SysEx is illegal but some
+    // devices emit it without the terminating 0xF7. Without escaping we would
+    // never leave inSysEx, and every subsequent NoteOn/Off would be forwarded
+    // raw past the transpose/filter path — manifesting as stuck notes / drift
+    // that no AOFF can clear. (Realtime bytes 0xF8-0xFF are already returned
+    // earlier, so a status byte here is in the 0x80-0xF7 range.)
+    if (midiData >= 0x80 && midiData != 0xF7) {
+      if (allowCurrentSysEx) {
+        Serial2.write((uint8_t)0xF7);  // close SysEx synthetically
+        midiOutCount++;
+      }
       inSysEx = false;
+      // fall through so the new status byte is parsed normally
+    } else {
+      if (allowCurrentSysEx) {
+        Serial2.write(midiData);
+        midiOutCount++;
+      }
+      if (midiData == 0xF7) {
+        inSysEx = false;
+      }
+      return;
     }
-    return;
   }
 
   if (midiData == 0xF0) {
