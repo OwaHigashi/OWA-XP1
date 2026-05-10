@@ -1257,110 +1257,79 @@ void key_callback(uint8_t *p_msg)
     portEXIT_CRITICAL(&g_keyStateMux);
 }
 
-// ---- 起動スプラッシュ "OWAMIDICON" ----
+// ---- 起動スプラッシュ "OWAMIDICON-Core2" ----
+// Mirrors M5Tab-MIDIXposeFil / M5Core2-MIDITransposerBT (commit aeda99b) for
+// a consistent boot identity across the OWAMIDICON sibling sketches: double
+// frame, deco lines with corner accent dots, faded title, subtitle, progress
+// bar, footer. Geometry/font scaled down for the 320×240 panel; animation
+// timing, fade math, and progress-bar logic match Tab5's drawSplash() 1:1.
 static void showSplashScreen() {
   const int W = SCREEN_WIDTH;
   const int H = SCREEN_HEIGHT;
+  const int cx = W / 2;
+  const int cy = H / 2;
 
-  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.fillScreen(TFT_BLACK);
 
-  // Phase 1: 上下のグラデーションバーを中央から左右にスイープイン (~150ms)
-  for (int step = 0; step <= W / 2; step += 10) {
-    int x0  = W / 2 - step;
-    int len = step * 2;
-    for (int i = 0; i < 6; i++) {
-      uint8_t r = (uint8_t)((i * 220) / 5);
-      uint8_t g = (uint8_t)(180 - i * 28);
-      uint8_t b = (uint8_t)(255 - i * 8);
-      uint16_t c = M5.Lcd.color565(r, g, b);
-      M5.Lcd.drawFastHLine(x0, 26 + i,      len, c);
-      M5.Lcd.drawFastHLine(x0, H - 32 + i,  len, c);
-    }
-    delay(8);
-  }
-  M5.Lcd.drawFastVLine(6,     26, H - 58, M5.Lcd.color565(0, 200, 255));
-  M5.Lcd.drawFastVLine(W - 7, 26, H - 58, M5.Lcd.color565(220, 0, 255));
+  M5.Lcd.drawRect(12, 12, W - 24, H - 24, 0x2104);
+  M5.Lcd.drawRect(15, 15, W - 30, H - 30, 0x18C3);
 
-  // Phase 2: スパークル散布 (~120ms)
-  for (int n = 0; n < 110; n++) {
-    int sx = 14 + (int)random(W - 28);
-    int sy = 45 + (int)random(H - 105);
-    uint16_t c;
-    switch (n % 4) {
-      case 0:  c = CYAN; break;
-      case 1:  c = MAGENTA; break;
-      case 2:  c = WHITE; break;
-      default: c = M5.Lcd.color565(255, 200, 0); break;
-    }
-    M5.Lcd.drawPixel(sx, sy, c);
-    if ((n & 9) == 0) delay(8);
-  }
-
-  // Phase 3: タイトル "OWAMIDICON" を虹色グロー脈動 (~2000ms)
-  uiFontHuge();
-  M5.Lcd.setTextDatum(MC_DATUM);
-  const char* title = "OWAMIDICON";
-  const int titleY     = H / 2 - 22;
-  const int titleBandY = titleY - 22;
-  const int titleBandH = 44;
-
-  const int pulseFrames = 50;
-  for (int p = 0; p < pulseFrames; p++) {
-    float ph = (float)p * (2.0f * 3.14159265f / pulseFrames);
-    int rr = 90 + (int)(165.0f * (sinf(ph)                        * 0.5f + 0.5f));
-    int gg = 90 + (int)(165.0f * (sinf(ph + 2.0944f /*120deg*/)   * 0.5f + 0.5f));
-    int bb = 90 + (int)(165.0f * (sinf(ph + 4.1888f /*240deg*/)   * 0.5f + 0.5f));
-
-    M5.Lcd.fillRect(0, titleBandY, W, titleBandH, BLACK);
-    M5.Lcd.setTextColor(M5.Lcd.color565(rr / 4, gg / 4, bb / 4));
-    M5.Lcd.drawString(title, W / 2 + 3, titleY + 3);
-    M5.Lcd.setTextColor(M5.Lcd.color565(rr / 2, gg / 2, bb / 2));
-    M5.Lcd.drawString(title, W / 2 + 1, titleY + 1);
-    M5.Lcd.setTextColor(M5.Lcd.color565(rr, gg, bb));
-    M5.Lcd.drawString(title, W / 2,     titleY);
-    delay(40);
-  }
-
-  // Phase 4: 最終色 (シアン) に確定し、装飾線 / サブタイトルを表示
-  M5.Lcd.fillRect(0, titleBandY, W, titleBandH, BLACK);
-  M5.Lcd.setTextColor(M5.Lcd.color565(0,  30,  90));
-  M5.Lcd.drawString(title, W / 2 + 3, titleY + 3);
-  M5.Lcd.setTextColor(M5.Lcd.color565(0, 110, 200));
-  M5.Lcd.drawString(title, W / 2 + 1, titleY + 1);
-  M5.Lcd.setTextColor(CYAN);
-  M5.Lcd.drawString(title, W / 2,     titleY);
-
-  M5.Lcd.drawFastHLine(W / 2 - 90, titleY + 24, 180, M5.Lcd.color565(0, 180, 255));
-  M5.Lcd.drawFastHLine(W / 2 - 60, titleY + 27, 120, M5.Lcd.color565(180, 0, 220));
+  const int hlHalf = 100;
+  M5.Lcd.drawFastHLine(cx - hlHalf, cy - 30, hlHalf * 2, 0x39E7);
+  M5.Lcd.drawFastHLine(cx - hlHalf, cy + 30, hlHalf * 2, 0x39E7);
+  M5.Lcd.fillCircle(cx - hlHalf, cy - 30, 2, TFT_CYAN);
+  M5.Lcd.fillCircle(cx + hlHalf, cy - 30, 2, TFT_CYAN);
+  M5.Lcd.fillCircle(cx - hlHalf, cy + 30, 2, TFT_CYAN);
+  M5.Lcd.fillCircle(cx + hlHalf, cy + 30, 2, TFT_CYAN);
 
   uiFontSmall();
-  M5.Lcd.setTextColor(WHITE);
-  M5.Lcd.drawString("MIDI Transposer + MIDI Message Manager", W / 2, H / 2 + 28);
-  M5.Lcd.setTextColor(M5.Lcd.color565(200, 80, 220));
-  M5.Lcd.drawString("M5Stack Core2 Edition", W / 2, H / 2 + 50);
+  M5.Lcd.setTextDatum(MC_DATUM);
+  M5.Lcd.setTextColor(0x8C71, TFT_BLACK);
+  M5.Lcd.drawString("MIDI Xpose + Filter + Manager + Unit MIDI", cx, cy + 18);
 
-  // Phase 5: ローディングバーをゆっくり充填 + ランダムな上空スパークル (~1100ms)
-  const int barX = 30;
-  const int barY = H - 50;
-  const int barW = W - 60;
-  const int barH = 4;
-  M5.Lcd.drawRect(barX - 1, barY - 1, barW + 2, barH + 2, DARKGREY);
-  for (int i = 0; i <= barW; i += 2) {
-    uint8_t r = (uint8_t)((i * 220) / barW);
-    uint8_t b = (uint8_t)(255 - (i * 60) / barW);
-    uint16_t c = M5.Lcd.color565(r, 100, b);
-    M5.Lcd.fillRect(barX + (i - 2 < 0 ? 0 : i - 2), barY, 2, barH, c);
-    if ((i & 7) == 0) {
-      int sx = barX + i + (int)random(-3, 4);
-      int sy = barY - 3 - (int)random(0, 7);
-      uint16_t sc = (i & 8) ? WHITE : M5.Lcd.color565(255, 220, 120);
-      M5.Lcd.drawPixel(sx, sy, sc);
+  M5.Lcd.setTextFont(1);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextColor(0x6B4D, TFT_BLACK);
+  M5.Lcd.drawString("for M5Stack Core2 (Unit MIDI on Port A)", cx, cy + 66);
+
+  const int pbW = 200;
+  const int pbH = 6;
+  const int pbX = cx - pbW / 2;
+  const int pbY = cy + 50;
+  M5.Lcd.drawRoundRect(pbX, pbY, pbW, pbH, 2, 0x4208);
+
+  const uint32_t totalMs = 3000;
+  const uint32_t startMs = millis();
+
+  uiFontMedium();
+  M5.Lcd.setTextDatum(MC_DATUM);
+
+  int lastFill = -1;
+  uint16_t lastTitleCol = 0xFFFE;
+
+  while (true) {
+    uint32_t e = millis() - startMs;
+    if (e >= totalMs) break;
+
+    uint8_t lum;
+    if (e < 700)                lum = (uint8_t)((uint32_t)255 * e / 700);
+    else if (e > totalMs - 300) lum = (uint8_t)((uint32_t)255 * (totalMs - e) / 300);
+    else                        lum = 255;
+
+    uint16_t tcol = M5.Lcd.color565(lum, lum, lum);
+    if (tcol != lastTitleCol) {
+      M5.Lcd.setTextColor(tcol, TFT_BLACK);
+      M5.Lcd.drawString("OWAMIDICON-Core2", cx, cy - 10);
+      lastTitleCol = tcol;
     }
-    delay(8);
-  }
 
-  // Phase 6: 最終ホールド
-  delay(500);
+    int fill = (int)((uint64_t)(pbW - 4) * e / totalMs);
+    if (fill != lastFill) {
+      if (fill > 0) M5.Lcd.fillRoundRect(pbX + 2, pbY + 2, fill, pbH - 4, 1, TFT_CYAN);
+      lastFill = fill;
+    }
+    delay(16);
+  }
 }
 
 void setup() {
