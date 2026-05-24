@@ -473,6 +473,7 @@ void sendPlayModeInit(bool resetProgramAndVolume);
 void sendAllNotesOff(void);
 void processMIDI(void);
 void processPlayTonePlayback(void);
+static void stopPlayTonePlayback(bool sendAllNotesOffFirst);
 
 // SMF Player 用の前方宣言
 bool smfPlayerEnsureSdInitialized();
@@ -2252,7 +2253,13 @@ void processPlayModeTouch(TouchPoint_t pos) {
   }
 
   if (touchInRect(pos, playTestBtn.x, playTestBtn.y, playTestBtn.w, playTestBtn.h)) {
-    sendPlayTestPhrase();
+    if (g_playTonePlayer.active) {
+      // 再生中にもう一度押したらトグルで停止（消音してから停止）
+      stopPlayTonePlayback(true);
+      Serial.println("Play test tone stopped (toggle)");
+    } else {
+      sendPlayTestPhrase();
+    }
     needFullRedraw = true;
     return;
   }
@@ -3597,6 +3604,14 @@ void advanceSubMode() {
 
 void processHardwareButtons() {
   unsigned long now = millis();
+
+  // 右ボタン（C）: 長押し=群切替(advanceDisplayMode) / 短押し=サブモード・
+  // SMF 操作(handleButtonCShortAction)。
+  // M5Core2 の Button::wasPressed() は「押し下げた瞬間(ダウンエッジ)」で
+  // true を返す。短押しをそこで発火させると指が触れた瞬間に確定してしまい、
+  // 700ms の長押し判定に到達できず、長押しでしか入れない転調群へ永久に
+  // 移行できなくなる。そこで短押しは「指を離した時(release)」に発火させ、
+  // その押下中に長押しが既に成立していたら抑止する。
   if (M5.BtnC.isPressed()) {
     if (!btnCLongPressHandled && M5.BtnC.pressedFor(MODE_LONG_PRESS_MS)) {
       handleButtonCLongAction();
@@ -3604,7 +3619,13 @@ void processHardwareButtons() {
       lastButtonCheck = now;
     }
   } else {
-    btnCLongPressHandled = false;
+    // wasReleasefor(0) は押下時間に依らず「離した瞬間」だけ true。
+    if (M5.BtnC.wasReleasefor(0) && !btnCLongPressHandled &&
+        (now - lastButtonCheck >= BUTTON_DEBOUNCE)) {
+      handleButtonCShortAction();
+      lastButtonCheck = now;
+    }
+    btnCLongPressHandled = false;  // 非押下中は次の押下に向けてラッチ解除
   }
 
   if (now - lastButtonCheck < BUTTON_DEBOUNCE) return;
@@ -3621,48 +3642,6 @@ void processHardwareButtons() {
     handleButtonBAction();
     lastButtonCheck = now;
     return;
-  }
-
-  // 右ボタン（C）: モード切り替え（DIRECT→KEY→INSTANT→SEQUENCE→…）
-  if (M5.BtnC.wasPressed() && !btnCLongPressHandled) {
-    handleButtonCShortAction();
-    lastButtonCheck = now;
-  }
-
-  if (false && M5.BtnC.wasPressed()) {
-    sendAllNotesOff();
-    delay(10);
-
-    if (currentMode == DIRECT_MODE) currentMode = KEY_MODE;
-    else if (currentMode == KEY_MODE) currentMode = INSTANT_MODE;
-    else if (currentMode == INSTANT_MODE) currentMode = SEQUENCE_MODE;
-    else currentMode = DIRECT_MODE;
-
-    if (currentMode == DIRECT_MODE) {
-      setCurrentTransposeButton();  // 現在の転調値に対応するボタンを光らせる
-      Serial.println("DirectMode: Current transpose button selected");
-    } else if (currentMode == KEY_MODE) {
-      selectedMajorKey = -1;
-      selectedMinorKey = -1;
-      Serial.println("KeyMode: All keys deselected");
-    } else if (currentMode == INSTANT_MODE) {
-      // 相対モード：特に選択状態は持たない
-      Serial.println("InstantMode entered");
-    } else {
-      // シーケンスモード：現在ステップの転調値を適用
-      handleTransposeChange(seqPatterns[seqCurrentPattern][seqCurrentStep]);
-      Serial.println("SequenceMode entered");
-    }
-
-    needFullRedraw = true;
-    lastButtonCheck = now;
-    // enum DisplayMode has 7 entries (PLAY/DIRECT/KEY/INSTANT/SEQUENCE/
-    // MIDI_MANAGE/SMF_PLAYER); the prior 4-entry modeNames[] indexed by
-    // currentMode read out-of-bounds for SEQUENCE_MODE (index 4) and beyond,
-    // returning a stack-garbage pointer that printf would then walk as a
-    // C string. Use the existing helper that switches over every enum value.
-    Serial.printf("Mode: %s, Transpose: %d (maintained)\n",
-                  getDisplayModeLabel(currentMode), transposeValue);
   }
 }
 
