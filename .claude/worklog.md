@@ -174,3 +174,15 @@ SysEx メッセージにも対応。
 
 - README.md / manual.html を 2 つの FilBT プロジェクトで更新。
 - 新規スクリーンショット: `09-smf-stop.png` / `10-smf-playing.png`
+
+## 2026-05-24
+
+### Button C release エッジ修正の確定 + 横断影響調査
+
+- commit ab4349c: Button C 短押しを `wasReleasefor` の release エッジで発火(down エッジ発火
+  だと長押し群切替に到達できないバグの修正)。PLAY テスト音ボタンはトグル停止に対応。
+- 同種バグ(同一ボタンに長押し+down短押し)の横断調査を実施。実害があったのは本 UM 版と
+  非UM版 ../M5Core2-MIDIXposeFilBT のみ。Tab 系(M5Unified/シリアル経由)と
+  ../M5Core2-PuyoVaders(release 発火)は非該当。詳細は FilBT 側 worklog 参照。
+- bin 更新: 再コンパイル済みで SDimg/00MIDIXposeFilBTUM-Black.bin はこの修正を含む
+  (1,415,408 B, 2026-05-24)。
