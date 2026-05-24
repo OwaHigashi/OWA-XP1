@@ -92,6 +92,29 @@ static constexpr int SMF_MAX_SONGS = 200;
 static constexpr int SMF_MAX_FILENAME = 32;
 static constexpr int SMF_TFCARD_CS_PIN = 4;
 static constexpr uint32_t SMF_SPI_SPEED_MHZ = 25;
+static constexpr int SMF_MAX_PATH = 160;        // フォルダブラウザのパス長
+static constexpr int SMF_BROWSE_PER_PAGE = 7;   // 選曲画面の1ページ行数
+// プレーヤー画面右上の ▶/■ タッチボタン
+static constexpr int SMF_PLAY_BTN_X = 244;      // ▶ 再生
+static constexpr int SMF_STOP_BTN_X = 283;      // ■ 停止
+static constexpr int SMF_PB_BTN_W   = 32;
+static constexpr int SMF_PB_BTN_Y   = 5;
+static constexpr int SMF_PB_BTN_H   = 37;
+// 選曲画面のレイアウト
+static constexpr int SMF_BROWSE_LIST_Y0 = 30;
+static constexpr int SMF_BROWSE_ROW_H   = 28;
+// プレーヤー画面下のボリュームタッチバー (左端=0 / 右端=最大)
+static constexpr int SMF_VOL_BAR_X0 = 8;
+static constexpr int SMF_VOL_BAR_X1 = 240;      // バー右端(右に音量数値を表示)
+static constexpr int SMF_VOL_BAR_Y  = 224;
+static constexpr int SMF_VOL_BAR_H  = 13;
+static constexpr int SMF_VOL_TOUCH_Y = 220;     // この y 以下のタッチを音量調整に
+
+// フォルダブラウザの1エントリ（サブフォルダ or 曲ファイル）
+struct SmfBrowseEntry {
+  char name[SMF_MAX_FILENAME];
+  bool isDir;
+};
 
 // ---- UIフォントヘルパー（GFXFFベースのきれいな描画に統一） ----
 // 旧 setTextSize(1)→Small, (2)→Medium, (3)→Large, (6)→Huge 相当
@@ -492,6 +515,24 @@ void smfPlayerDrawKeyboardCanvas();
 void smfPlayerKeyOn(uint8_t channel, uint8_t note, uint8_t velocity);
 void smfPlayerKeyOff(uint8_t channel, uint8_t note);
 void smfPlayerClearKeyboard();
+// フォルダブラウザ（便利な即選曲画面）
+int  smfPlayerLoadSongsFromFolder(const char* dir);
+void smfPlayerScanBrowseDir(const char* dir);
+void smfPlayerGotoSong(int dir);
+void smfBrowserOpen();
+void smfBrowserClose();
+void smfBrowserToggle();
+void smfBrowserPage(int delta);
+void smfBrowserGoUp();
+void smfBrowserActivateRow(int row);
+void smfBrowserPlayFile(const char* name);
+void drawSmfBrowserScreen();
+void processSmfPlayerTouch(TouchPoint_t pos);
+void processSmfBrowserTouch(TouchPoint_t pos);
+void handleButtonALongAction();
+void handleButtonBLongAction();
+void sendMasterVolume(uint8_t vol);
+void smfPlayerDrawVolumeBar();
 
 // Sequence Mode用の設定
 #define SEQ_PATTERN_COUNT 16
@@ -546,6 +587,8 @@ int midiSelectedFilterRule = 0;
 int midiSelectedMapperRule = 0;
 DisplayMode lastTransposeMode = DIRECT_MODE;
 bool btnCLongPressHandled = false;
+bool btnALongPressHandled = false;
+bool btnBLongPressHandled = false;
 const unsigned long MODE_LONG_PRESS_MS = 700;
 
 // Bluetooth HID foot pedal state management
@@ -577,7 +620,23 @@ static int g_smfPlayIndex = 0;
 static bool g_smfSdInitialized = false;
 static SmfPlayState g_smfState = SMF_STOPPED;
 static char g_smfCurrentFilename[SMF_MAX_FILENAME] = {0};
-static const char* g_smfFolder = "/smf";  // scan 後に "/smf" か "/SMF" が入る
+static char g_smfFolder[SMF_MAX_PATH] = "/smf";      // 現在再生中の曲が入っているフォルダ
+static char g_smfBaseFolder[SMF_MAX_PATH] = "/smf";  // スキャンで見つけた基底 (/smf か /SMF)
+// フォルダブラウザ（便利な即選曲画面）の状態
+static SmfBrowseEntry g_smfEntries[SMF_MAX_SONGS];   // 現在の閲覧フォルダのフォルダ+曲
+static int g_smfEntryCount = 0;
+static char g_smfBrowseDir[SMF_MAX_PATH] = "/smf";   // 現在閲覧中のフォルダ
+static int g_smfBrowsePage = 0;
+static bool g_smfBrowserActive = false;
+// 選曲画面を開いた直後、鍵盤→選曲画面の遷移で紛れ込んだ残像を消すため
+// 数ティックだけ選曲画面を描き直すためのカウンタ。
+static int g_smfBrowserSettle = 0;
+// マスターボリューム(0-127)。画面下のタッチバーで調整し GM Master Volume
+// SysEx で Unit MIDI 全体の音量を変える(曲ごとの CC7 には触れない)。
+static uint8_t g_masterVolume = 100;
+// 曲頭の GM リセットがマスターボリュームを既定値(最大)に戻すため、
+// 再生開始から少し遅れて再送する予約時刻(0=予約なし)。
+static unsigned long g_smfVolumeResendAt = 0;
 // 16ch x 128 ノートのオン/オフ状態（リアルタイム鍵盤表示用）
 static uint8_t g_smfKeyState[16][128] = {{0}};
 // 鍵盤表示の差分更新用前フレームスナップショット
@@ -1756,7 +1815,8 @@ void initSequenceModeButtons() {
 
 void drawInterface() {
   if (currentMode == SMF_PLAYER_MODE) {
-    drawSmfPlayerScreen();
+    if (g_smfBrowserActive) drawSmfBrowserScreen();
+    else                    drawSmfPlayerScreen();
     return;
   }
 
@@ -1798,8 +1858,14 @@ void drawInterface() {
       hint = "Tap PRG name  B:Init  C:Panic";
     } else if (currentMode == MIDI_MANAGE_MODE) {
       hint = (midiManagePage == MIDI_PAGE_FILTER) ? "B:Type  Hold:Grp" : "B:PG1/2  Hold:Grp";
+    } else if (currentMode == INSTANT_MODE) {
+      hint = "B:Zero";
+    } else if (currentMode == SEQUENCE_MODE) {
+      hint = "B:Next";
+    } else if (currentMode == DIRECT_MODE) {
+      hint = "B:Range";
     } else {
-      hint = "B:Action  Hold:Grp";
+      hint = "B:Action";
     }
     uiDrawL(hint, 200, 22);
   }
@@ -2837,6 +2903,88 @@ bool smfPlayerEnsureSdInitialized() {
   return true;
 }
 
+static bool smfIsMidiName(const char* name) {
+  String fn(name);
+  return fn.endsWith(".mid") || fn.endsWith(".MID") ||
+         fn.endsWith(".smf") || fn.endsWith(".SMF");
+}
+
+// 指定フォルダ直下の曲ファイルだけを g_smfSongList に読み込む（曲送り/戻り用）。
+int smfPlayerLoadSongsFromFolder(const char* dir) {
+  g_smfSongCount = 0;
+  if (!smfPlayerEnsureSdInitialized()) return 0;
+  FsFile root = g_smfSd.open(dir);
+  if (!root || !root.isDirectory()) {
+    if (root) root.close();
+    return 0;
+  }
+  FsFile entry;
+  while (entry.openNext(&root, O_RDONLY)) {
+    if (!entry.isDir()) {
+      char filename[SMF_MAX_FILENAME];
+      entry.getName(filename, sizeof(filename));
+      if (smfIsMidiName(filename)) {
+        strncpy(g_smfSongList[g_smfSongCount], filename, SMF_MAX_FILENAME);
+        g_smfSongList[g_smfSongCount][SMF_MAX_FILENAME - 1] = '\0';
+        g_smfSongCount++;
+        if (g_smfSongCount >= SMF_MAX_SONGS) { entry.close(); break; }
+      }
+    }
+    entry.close();
+  }
+  root.close();
+  return g_smfSongCount;
+}
+
+// フォルダブラウザ用: 指定フォルダ直下のサブフォルダ(先)と曲ファイル(後)を g_smfEntries に列挙。
+void smfPlayerScanBrowseDir(const char* dir) {
+  g_smfEntryCount = 0;
+  g_smfBrowsePage = 0;
+  if (!smfPlayerEnsureSdInitialized()) return;
+
+  // パス1: サブフォルダを先に
+  FsFile root = g_smfSd.open(dir);
+  if (root && root.isDirectory()) {
+    FsFile entry;
+    while (entry.openNext(&root, O_RDONLY)) {
+      if (entry.isDir()) {
+        char nm[SMF_MAX_FILENAME];
+        entry.getName(nm, sizeof(nm));
+        if (nm[0] != '.') {  // 隠し/特殊フォルダは除外
+          strncpy(g_smfEntries[g_smfEntryCount].name, nm, SMF_MAX_FILENAME);
+          g_smfEntries[g_smfEntryCount].name[SMF_MAX_FILENAME - 1] = '\0';
+          g_smfEntries[g_smfEntryCount].isDir = true;
+          g_smfEntryCount++;
+          if (g_smfEntryCount >= SMF_MAX_SONGS) { entry.close(); break; }
+        }
+      }
+      entry.close();
+    }
+  }
+  if (root) root.close();
+
+  // パス2: 曲ファイル
+  root = g_smfSd.open(dir);
+  if (root && root.isDirectory()) {
+    FsFile entry;
+    while (g_smfEntryCount < SMF_MAX_SONGS && entry.openNext(&root, O_RDONLY)) {
+      if (!entry.isDir()) {
+        char nm[SMF_MAX_FILENAME];
+        entry.getName(nm, sizeof(nm));
+        if (smfIsMidiName(nm)) {
+          strncpy(g_smfEntries[g_smfEntryCount].name, nm, SMF_MAX_FILENAME);
+          g_smfEntries[g_smfEntryCount].name[SMF_MAX_FILENAME - 1] = '\0';
+          g_smfEntries[g_smfEntryCount].isDir = false;
+          g_smfEntryCount++;
+        }
+      }
+      entry.close();
+    }
+  }
+  if (root) root.close();
+  Serial.printf("[SMF] browse %s : %d entries\n", dir, g_smfEntryCount);
+}
+
 void smfPlayerScanSongs() {
   g_smfSongCount = 0;
   if (!smfPlayerEnsureSdInitialized()) return;
@@ -2849,6 +2997,7 @@ void smfPlayerScanSongs() {
     root = g_smfSd.open(kSmfFolderCandidates[i]);
     if (root && root.isDirectory()) {
       foundFolder = kSmfFolderCandidates[i];
+      root.close();
       break;
     }
     if (root) root.close();
@@ -2872,26 +3021,15 @@ void smfPlayerScanSongs() {
     }
     return;
   }
-  g_smfFolder = foundFolder;
+  // 基底フォルダ・再生フォルダ・閲覧フォルダをすべて見つかった /smf に合わせる
+  strncpy(g_smfBaseFolder, foundFolder, SMF_MAX_PATH);
+  g_smfBaseFolder[SMF_MAX_PATH - 1] = '\0';
+  strncpy(g_smfFolder, foundFolder, SMF_MAX_PATH);
+  g_smfFolder[SMF_MAX_PATH - 1] = '\0';
+  strncpy(g_smfBrowseDir, foundFolder, SMF_MAX_PATH);
+  g_smfBrowseDir[SMF_MAX_PATH - 1] = '\0';
   Serial.printf("[SMF] Scanning %s\n", foundFolder);
-  FsFile entry;
-  while (entry.openNext(&root, O_RDONLY)) {
-    if (!entry.isDir()) {
-      char filename[SMF_MAX_FILENAME];
-      entry.getName(filename, sizeof(filename));
-      String fn(filename);
-      if (fn.endsWith(".mid") || fn.endsWith(".MID") ||
-          fn.endsWith(".smf") || fn.endsWith(".SMF")) {
-        strncpy(g_smfSongList[g_smfSongCount], filename, SMF_MAX_FILENAME);
-        g_smfSongList[g_smfSongCount][SMF_MAX_FILENAME - 1] = '\0';
-        Serial.printf("[SMF] %2d: %s\n", g_smfSongCount, filename);
-        g_smfSongCount++;
-        if (g_smfSongCount >= SMF_MAX_SONGS) { entry.close(); break; }
-      }
-    }
-    entry.close();
-  }
-  root.close();
+  smfPlayerLoadSongsFromFolder(foundFolder);
   Serial.printf("[SMF] %d song(s) found\n", g_smfSongCount);
 }
 
@@ -2901,6 +3039,111 @@ const char* smfPlayerMakeFilename(int seq) {
   if (g_smfPlayIndex >= g_smfSongCount) g_smfPlayIndex = 0;
   if (g_smfPlayIndex < 0) g_smfPlayIndex = g_smfSongCount - 1;
   return g_smfSongList[g_smfPlayIndex];
+}
+
+// 曲送り(dir=+1)/曲戻り(dir=-1)。再生中なら止めて新しい曲を続けて再生、
+// 停止中なら選曲だけ（画面の ▶ を押すまで再生しない）。
+void smfPlayerGotoSong(int dir) {
+  if (g_smfSongCount == 0) return;
+  bool wasPlaying = (g_smfState == SMF_PLAYING);
+  if (wasPlaying) smfPlayerStopPlaying();
+  const char* nx = smfPlayerMakeFilename(dir);
+  if (nx) {
+    strncpy(g_smfCurrentFilename, nx, SMF_MAX_FILENAME);
+    g_smfCurrentFilename[SMF_MAX_FILENAME - 1] = '\0';
+  }
+  if (wasPlaying) smfPlayerStartPlaying();
+  else            drawSmfPlayerScreen();
+}
+
+// ---- フォルダブラウザ（便利な即選曲画面） ----
+
+void smfBrowserOpen() {
+  // 現在再生中の曲があるフォルダから開く
+  strncpy(g_smfBrowseDir, g_smfFolder, SMF_MAX_PATH);
+  g_smfBrowseDir[SMF_MAX_PATH - 1] = '\0';
+  smfPlayerScanBrowseDir(g_smfBrowseDir);
+  g_smfBrowserActive = true;
+  // 鍵盤→選曲画面の遷移フレームで紛れ込む残像を、続く数ティックの
+  // 描き直しで確実に消す。
+  g_smfBrowserSettle = 3;
+  Serial.println("[SMF] browser OPEN -> keyboard draw suspended");
+  drawSmfBrowserScreen();
+}
+
+void smfBrowserClose() {
+  g_smfBrowserActive = false;
+  Serial.println("[SMF] browser CLOSE -> keyboard draw resumed");
+  drawSmfPlayerScreen();
+}
+
+void smfBrowserToggle() {
+  if (g_smfBrowserActive) smfBrowserClose();
+  else                    smfBrowserOpen();
+}
+
+void smfBrowserPage(int delta) {
+  bool hasUp = (strcmp(g_smfBrowseDir, g_smfBaseFolder) != 0);
+  int total = g_smfEntryCount + (hasUp ? 1 : 0);
+  int pages = (total + SMF_BROWSE_PER_PAGE - 1) / SMF_BROWSE_PER_PAGE;
+  if (pages < 1) pages = 1;
+  g_smfBrowsePage += delta;
+  if (g_smfBrowsePage < 0) g_smfBrowsePage = pages - 1;
+  if (g_smfBrowsePage >= pages) g_smfBrowsePage = 0;
+  drawSmfBrowserScreen();
+}
+
+void smfBrowserGoUp() {
+  // 末尾の "/component" を削って親へ。基底フォルダより上には行かない。
+  if (strcmp(g_smfBrowseDir, g_smfBaseFolder) == 0) return;
+  char* slash = strrchr(g_smfBrowseDir, '/');
+  if (slash && slash != g_smfBrowseDir) {
+    *slash = '\0';
+  } else {
+    strncpy(g_smfBrowseDir, g_smfBaseFolder, SMF_MAX_PATH);
+    g_smfBrowseDir[SMF_MAX_PATH - 1] = '\0';
+  }
+  smfPlayerScanBrowseDir(g_smfBrowseDir);
+  drawSmfBrowserScreen();
+}
+
+// ブラウザでフォルダ直下の曲を選んで即再生。閲覧フォルダを再生フォルダに昇格。
+void smfBrowserPlayFile(const char* name) {
+  strncpy(g_smfFolder, g_smfBrowseDir, SMF_MAX_PATH);
+  g_smfFolder[SMF_MAX_PATH - 1] = '\0';
+  smfPlayerLoadSongsFromFolder(g_smfFolder);
+  g_smfPlayIndex = 0;
+  for (int i = 0; i < g_smfSongCount; i++) {
+    if (strcmp(g_smfSongList[i], name) == 0) { g_smfPlayIndex = i; break; }
+  }
+  strncpy(g_smfCurrentFilename, name, SMF_MAX_FILENAME);
+  g_smfCurrentFilename[SMF_MAX_FILENAME - 1] = '\0';
+  g_smfBrowserActive = false;
+  if (g_smfState == SMF_PLAYING) smfPlayerStopPlaying();
+  smfPlayerStartPlaying();
+}
+
+// ブラウザの行タップ処理（行0..SMF_BROWSE_PER_PAGE-1）。
+void smfBrowserActivateRow(int row) {
+  if (row < 0 || row >= SMF_BROWSE_PER_PAGE) return;
+  bool hasUp = (strcmp(g_smfBrowseDir, g_smfBaseFolder) != 0);
+  int displayIdx = g_smfBrowsePage * SMF_BROWSE_PER_PAGE + row;
+  if (hasUp) {
+    if (displayIdx == 0) { smfBrowserGoUp(); return; }
+    displayIdx -= 1;
+  }
+  if (displayIdx < 0 || displayIdx >= g_smfEntryCount) return;
+  SmfBrowseEntry& e = g_smfEntries[displayIdx];
+  if (e.isDir) {
+    char path[SMF_MAX_PATH];
+    snprintf(path, sizeof(path), "%s/%s", g_smfBrowseDir, e.name);
+    strncpy(g_smfBrowseDir, path, SMF_MAX_PATH);
+    g_smfBrowseDir[SMF_MAX_PATH - 1] = '\0';
+    smfPlayerScanBrowseDir(g_smfBrowseDir);
+    drawSmfBrowserScreen();
+  } else {
+    smfBrowserPlayFile(e.name);
+  }
 }
 
 void smfPlayerMidiCallback(midi_event* pev) {
@@ -3004,44 +3247,194 @@ void smfPlayerUpdateKeyboardIncremental() {
   }
 }
 
+// 右上の ▶(再生) / ■(停止) タッチボタン。再生中は ■ が赤、停止中は ▶ が緑で点灯。
+// GM ユニバーサル Master Volume SysEx で Unit MIDI(SAM2695)全体の音量を設定。
+// 0-127。曲ごとの CC7(チャンネルボリューム)には触れないので曲のミックスは保たれる。
+void sendMasterVolume(uint8_t vol) {
+  if (vol > 127) vol = 127;
+  uint8_t sx[8] = { 0xF0, 0x7F, 0x7F, 0x04, 0x01, 0x00, vol, 0xF7 };
+  Serial2.write(sx, sizeof(sx));
+  midiOutCount += sizeof(sx);
+}
+
+// プレーヤー画面下部のボリュームタッチバー（左端=0 / 右端=最大）。
+void smfPlayerDrawVolumeBar() {
+  int x0 = SMF_VOL_BAR_X0, x1 = SMF_VOL_BAR_X1;
+  int w = x1 - x0;
+  int fill = (int)((long)w * g_masterVolume / 127);
+  M5.Lcd.fillRect(x0, SMF_VOL_BAR_Y, w, SMF_VOL_BAR_H, TFT_BLACK);
+  M5.Lcd.fillRect(x0, SMF_VOL_BAR_Y, fill, SMF_VOL_BAR_H, TFT_GREEN);
+  M5.Lcd.drawRect(x0, SMF_VOL_BAR_Y, w, SMF_VOL_BAR_H, TFT_DARKGREY);
+  M5.Lcd.setTextFont(2);
+  M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Lcd.setCursor(x1 + 6, SMF_VOL_BAR_Y - 2);
+  M5.Lcd.printf("VOL%3d", g_masterVolume);
+}
+
+void smfPlayerDrawTransport() {
+  bool playing = (g_smfState == SMF_PLAYING);
+  int pcx = SMF_PLAY_BTN_X, pcy = SMF_PB_BTN_Y;
+  // ▶ Play
+  M5.Lcd.fillRect(pcx, pcy, SMF_PB_BTN_W, SMF_PB_BTN_H, TFT_BLACK);
+  M5.Lcd.fillTriangle(pcx + 4, pcy + 3,
+                      pcx + 4, pcy + SMF_PB_BTN_H - 3,
+                      pcx + SMF_PB_BTN_W - 3, pcy + SMF_PB_BTN_H / 2,
+                      playing ? TFT_DARKGREY : TFT_GREEN);
+  // ■ Stop
+  int scx = SMF_STOP_BTN_X;
+  M5.Lcd.fillRect(scx, pcy, SMF_PB_BTN_W, SMF_PB_BTN_H, TFT_BLACK);
+  M5.Lcd.fillRect(scx + 3, pcy + 3, SMF_PB_BTN_W - 6, SMF_PB_BTN_H - 6,
+                  playing ? TFT_RED : TFT_DARKGREY);
+}
+
 void drawSmfPlayerScreen() {
   M5.Lcd.fillScreen(TFT_BLACK);
   smfPlayerDrawKeyboardCanvas();
 
+  // ファイル名（▶/■ ボタンに被らないよう左側に切り詰めて表示）
   M5.Lcd.setTextFont(4);
   M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
   M5.Lcd.setCursor(5, 0);
-  if (g_smfCurrentFilename[0]) M5.Lcd.println(g_smfCurrentFilename);
-  else                          M5.Lcd.println("(no song)");
+  if (g_smfCurrentFilename[0]) {
+    char shown[20];
+    strncpy(shown, g_smfCurrentFilename, sizeof(shown));
+    shown[sizeof(shown) - 1] = '\0';
+    if (strlen(g_smfCurrentFilename) >= sizeof(shown)) {
+      shown[sizeof(shown) - 2] = '.';
+      shown[sizeof(shown) - 3] = '.';
+    }
+    M5.Lcd.print(shown);
+  } else {
+    M5.Lcd.print("(no song)");
+  }
 
   M5.Lcd.setCursor(5, 27);
   M5.Lcd.print("Status:");
   switch (g_smfState) {
-    case SMF_ERROR:
-      M5.Lcd.println(" load error");
-      break;
-    case SMF_STOPPED:
-      M5.Lcd.println(" stop");
-      M5.Lcd.fillRect(260, 5, 40, 40, TFT_WHITE);
-      break;
-    case SMF_PLAYING:
-      M5.Lcd.println(" playing");
-      M5.Lcd.fillRect(280, 5, 30, 40, TFT_BLACK);
-      M5.Lcd.fillTriangle(280, 5, 280, 45, 310, 25, TFT_YELLOW);
-      break;
-    case SMF_PAUSE:   M5.Lcd.println(" pause"); break;
-    case SMF_WAITING: M5.Lcd.println(" wait");  break;
+    case SMF_ERROR:   M5.Lcd.print(" load error"); break;
+    case SMF_STOPPED: M5.Lcd.print(" stop");       break;
+    case SMF_PLAYING: M5.Lcd.print(" playing");    break;
+    case SMF_PAUSE:   M5.Lcd.print(" pause");      break;
+    case SMF_WAITING: M5.Lcd.print(" wait");       break;
     default: break;
   }
+
+  smfPlayerDrawTransport();
+  smfPlayerDrawVolumeBar();
 
   // 次フレームで全ノート再評価させるためにキャッシュをクリア
   memset(g_smfKeyDrawn, 0, sizeof(g_smfKeyDrawn));
 }
 
+// 便利な即選曲画面（フォルダブラウザ）。
+void drawSmfBrowserScreen() {
+  M5.Lcd.fillScreen(TFT_BLACK);
+
+  bool hasUp = (strcmp(g_smfBrowseDir, g_smfBaseFolder) != 0);
+  int total = g_smfEntryCount + (hasUp ? 1 : 0);
+  int pages = (total + SMF_BROWSE_PER_PAGE - 1) / SMF_BROWSE_PER_PAGE;
+  if (pages < 1) pages = 1;
+  if (g_smfBrowsePage >= pages) g_smfBrowsePage = 0;
+
+  // ---- 上部バー: << / パス / p/total / >> / X ----
+  M5.Lcd.fillRoundRect(2, 2, 44, 24, 4, TFT_NAVY);
+  M5.Lcd.fillRoundRect(230, 2, 44, 24, 4, TFT_NAVY);
+  M5.Lcd.fillRoundRect(280, 2, 38, 24, 4, TFT_MAROON);
+  M5.Lcd.setTextFont(2);
+  M5.Lcd.setTextColor(TFT_WHITE, TFT_NAVY);
+  M5.Lcd.setCursor(8, 6);  M5.Lcd.print("<<");
+  M5.Lcd.setCursor(238, 6); M5.Lcd.print(">>");
+  M5.Lcd.setTextColor(TFT_WHITE, TFT_MAROON);
+  M5.Lcd.setCursor(292, 6); M5.Lcd.print("X");
+
+  // パス（基底からの相対）とページ番号
+  M5.Lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+  const char* shownPath = g_smfBrowseDir;
+  if (strncmp(g_smfBrowseDir, g_smfBaseFolder, strlen(g_smfBaseFolder)) == 0) {
+    shownPath = g_smfBrowseDir + strlen(g_smfBaseFolder);
+    if (shownPath[0] == '\0') shownPath = "/";
+  }
+  M5.Lcd.setCursor(52, 6);
+  M5.Lcd.printf("%-.22s  %d/%d", shownPath, g_smfBrowsePage + 1, pages);
+
+  // ---- 一覧 ----
+  M5.Lcd.setTextFont(2);
+  for (int r = 0; r < SMF_BROWSE_PER_PAGE; r++) {
+    int displayIdx = g_smfBrowsePage * SMF_BROWSE_PER_PAGE + r;
+    if (displayIdx >= total) break;
+    int y = SMF_BROWSE_LIST_Y0 + r * SMF_BROWSE_ROW_H;
+
+    char label[40];
+    uint16_t fg = TFT_WHITE;
+    if (hasUp && displayIdx == 0) {
+      snprintf(label, sizeof(label), "[..] up");
+      fg = TFT_YELLOW;
+    } else {
+      int entryIdx = displayIdx - (hasUp ? 1 : 0);
+      SmfBrowseEntry& e = g_smfEntries[entryIdx];
+      if (e.isDir) {
+        snprintf(label, sizeof(label), "[DIR] %s/", e.name);
+        fg = TFT_CYAN;
+      } else {
+        snprintf(label, sizeof(label), " %s", e.name);
+        fg = TFT_WHITE;
+      }
+    }
+    M5.Lcd.drawRoundRect(2, y, 316, SMF_BROWSE_ROW_H - 2, 3, TFT_DARKGREY);
+    M5.Lcd.setTextColor(fg, TFT_BLACK);
+    M5.Lcd.setCursor(8, y + 4);
+    M5.Lcd.print(label);
+  }
+}
+
+// 選曲画面のタッチ: << / >> ページ送り, X 閉じる, 行タップでフォルダ移動 or 即再生。
+void processSmfBrowserTouch(TouchPoint_t pos) {
+  if (pos.y < SMF_BROWSE_LIST_Y0) {
+    if (pos.x < 50)                          { smfBrowserPage(-1); return; }
+    if (pos.x >= 228 && pos.x < 278)         { smfBrowserPage(1);  return; }
+    if (pos.x >= 278)                        { smfBrowserClose();  return; }
+    return;
+  }
+  int row = (pos.y - SMF_BROWSE_LIST_Y0) / SMF_BROWSE_ROW_H;
+  smfBrowserActivateRow(row);
+}
+
+// プレーヤー画面のタッチ: 右上の ▶ で再生, ■ で停止, 画面下のバーで音量調整。
+void processSmfPlayerTouch(TouchPoint_t pos) {
+  if (g_smfBrowserActive) { processSmfBrowserTouch(pos); return; }
+  if (pos.y < 50) {
+    if (pos.x >= 240 && pos.x < 280) {
+      if (g_smfState != SMF_PLAYING) smfPlayerStartPlaying();
+      return;
+    }
+    if (pos.x >= 280) {
+      if (g_smfState == SMF_PLAYING) smfPlayerStopPlaying();
+      return;
+    }
+    return;
+  }
+  // 画面下のボリュームバー: タッチ位置で 0(左端)〜127(右端) を決める。
+  if (pos.y >= SMF_VOL_TOUCH_Y) {
+    int x = pos.x;
+    if (x < SMF_VOL_BAR_X0) x = SMF_VOL_BAR_X0;
+    if (x > SMF_VOL_BAR_X1) x = SMF_VOL_BAR_X1;
+    int v = (int)((long)(x - SMF_VOL_BAR_X0) * 127 / (SMF_VOL_BAR_X1 - SMF_VOL_BAR_X0));
+    g_masterVolume = (uint8_t)v;
+    sendMasterVolume(g_masterVolume);
+    smfPlayerDrawVolumeBar();
+    return;
+  }
+}
+
+// 選曲画面を開いている間はプレーヤー画面を描き直さない（選曲画面の上書き防止）。
+void smfPlayerRefreshScreen() {
+  if (!g_smfBrowserActive) drawSmfPlayerScreen();
+}
+
 void smfPlayerStartPlaying() {
   if (g_smfSongCount == 0 || g_smfCurrentFilename[0] == 0) {
     g_smfState = SMF_ERROR;
-    drawSmfPlayerScreen();
+    smfPlayerRefreshScreen();
     return;
   }
   char filepath[256];
@@ -3052,13 +3445,16 @@ void smfPlayerStartPlaying() {
   if (err != MD_MIDIFile::E_OK) {
     Serial.printf("[SMF] load failed: %d\n", err);
     g_smfState = SMF_ERROR;
-    drawSmfPlayerScreen();
+    smfPlayerRefreshScreen();
     return;
   }
   g_smf.setMidiHandler(smfPlayerMidiCallback);
   g_smf.setSysexHandler(smfPlayerSysexCallback);
   g_smfState = SMF_PLAYING;
-  drawSmfPlayerScreen();
+  // マスターボリュームを即送出 + 曲頭の GM リセット後に再送(800ms 後)。
+  sendMasterVolume(g_masterVolume);
+  g_smfVolumeResendAt = millis() + 800;
+  smfPlayerRefreshScreen();
   Serial.printf("[SMF] Playing %s\n", g_smfCurrentFilename);
 }
 
@@ -3069,12 +3465,14 @@ void smfPlayerStopPlaying() {
     g_smfState = SMF_STOPPED;
     Serial.println("[SMF] Stopped");
   }
-  drawSmfPlayerScreen();
+  smfPlayerRefreshScreen();
 }
 
 void smfPlayerEnter() {
   sendAllNotesOff();
   smfPlayerClearKeyboard();
+  g_smfBrowserActive = false;
+  sendMasterVolume(g_masterVolume);  // 入室時に現在の音量を反映
   if (g_smfSongCount == 0) {
     smfPlayerScanSongs();
     if (g_smfSongCount > 0) {
@@ -3089,6 +3487,7 @@ void smfPlayerEnter() {
 }
 
 void smfPlayerExit() {
+  g_smfBrowserActive = false;
   if (g_smfState == SMF_PLAYING) smfPlayerStopPlaying();
   else                           smfPlayerMidiSilence();
   // SdFat を解放し SD.h を再初期化（他機能が SD.h で SD カードへ書き戻すため）
@@ -3120,8 +3519,21 @@ void smfPlayerProcessLoop() {
     }
   }
 
-  // 鍵盤の差分更新
-  smfPlayerUpdateKeyboardIncremental();
+  // 再生開始から少し遅れてマスターボリュームを再送する。
+  // 曲頭の GM リセットが音量を最大に戻すため、それを上書きし直す。
+  if (g_smfVolumeResendAt != 0 && millis() >= g_smfVolumeResendAt) {
+    g_smfVolumeResendAt = 0;
+    sendMasterVolume(g_masterVolume);
+  }
+
+  // 鍵盤の差分更新（選曲画面を開いている間は描かない）。
+  if (!g_smfBrowserActive) {
+    smfPlayerUpdateKeyboardIncremental();
+  } else if (g_smfBrowserSettle > 0) {
+    // 開いた直後だけ選曲画面を描き直し、遷移時の鍵盤残像をクリア。
+    g_smfBrowserSettle--;
+    drawSmfBrowserScreen();
+  }
 }
 
 void drawMidiRuleListBox(int x, int y, int w, int h, bool selected) {
@@ -3626,6 +4038,43 @@ void processHardwareButtons() {
       lastButtonCheck = now;
     }
     btnCLongPressHandled = false;  // 非押下中は次の押下に向けてラッチ解除
+  }
+
+  // SMF Player では A/B も長押しを持つ（長押し=便利な即選曲画面の開閉、
+  // 短押し=曲戻り/曲送り）。C と同じく短押しは release で発火させ、長押し
+  // 成立時は短押しを抑止する。他モードでは従来どおり wasPressed の即時動作。
+  if (currentMode == SMF_PLAYER_MODE) {
+    // 左ボタン（A）
+    if (M5.BtnA.isPressed()) {
+      if (!btnALongPressHandled && M5.BtnA.pressedFor(MODE_LONG_PRESS_MS)) {
+        handleButtonALongAction();
+        btnALongPressHandled = true;
+        lastButtonCheck = now;
+      }
+    } else {
+      if (M5.BtnA.wasReleasefor(0) && !btnALongPressHandled &&
+          (now - lastButtonCheck >= BUTTON_DEBOUNCE)) {
+        handleButtonAAction();
+        lastButtonCheck = now;
+      }
+      btnALongPressHandled = false;
+    }
+    // 真ん中ボタン（B）
+    if (M5.BtnB.isPressed()) {
+      if (!btnBLongPressHandled && M5.BtnB.pressedFor(MODE_LONG_PRESS_MS)) {
+        handleButtonBLongAction();
+        btnBLongPressHandled = true;
+        lastButtonCheck = now;
+      }
+    } else {
+      if (M5.BtnB.wasReleasefor(0) && !btnBLongPressHandled &&
+          (now - lastButtonCheck >= BUTTON_DEBOUNCE)) {
+        handleButtonBAction();
+        lastButtonCheck = now;
+      }
+      btnBLongPressHandled = false;
+    }
+    return;
   }
 
   if (now - lastButtonCheck < BUTTON_DEBOUNCE) return;
@@ -4197,23 +4646,9 @@ bool parseIntValue(const char* token, int& outValue) {
 
 void handleButtonAAction() {
   if (currentMode == SMF_PLAYER_MODE) {
-    // 前の曲へ。再生中なら止めてから次の曲を再生、停止中ならファイル選択のみ。
-    if (g_smfState == SMF_PLAYING) {
-      smfPlayerStopPlaying();
-      const char* nx = smfPlayerMakeFilename(-1);
-      if (nx) {
-        strncpy(g_smfCurrentFilename, nx, SMF_MAX_FILENAME);
-        g_smfCurrentFilename[SMF_MAX_FILENAME - 1] = '\0';
-      }
-      smfPlayerStartPlaying();
-    } else {
-      const char* nx = smfPlayerMakeFilename(-1);
-      if (nx) {
-        strncpy(g_smfCurrentFilename, nx, SMF_MAX_FILENAME);
-        g_smfCurrentFilename[SMF_MAX_FILENAME - 1] = '\0';
-      }
-      drawSmfPlayerScreen();
-    }
+    // 選曲画面表示中は前ページ、通常画面は曲戻り。
+    if (g_smfBrowserActive) smfBrowserPage(-1);
+    else                    smfPlayerGotoSong(-1);
     return;
   }
   allNotesOffEnabled = !allNotesOffEnabled;
@@ -4221,11 +4656,21 @@ void handleButtonAAction() {
   Serial.printf("All Notes Off: %s\n", allNotesOffEnabled ? "ON" : "OFF");
 }
 
+// A 長押し: 便利な即選曲画面（フォルダブラウザ）の開閉。
+void handleButtonALongAction() {
+  if (currentMode == SMF_PLAYER_MODE) smfBrowserToggle();
+}
+
+// B 長押し: A 長押しと同じく選曲画面の開閉。
+void handleButtonBLongAction() {
+  if (currentMode == SMF_PLAYER_MODE) smfBrowserToggle();
+}
+
 void handleButtonBAction() {
   if (currentMode == SMF_PLAYER_MODE) {
-    // 再生・停止トグル
-    if (g_smfState == SMF_PLAYING) smfPlayerStopPlaying();
-    else                            smfPlayerStartPlaying();
+    // 選曲画面表示中は次ページ、通常画面は曲送り。
+    if (g_smfBrowserActive) smfBrowserPage(1);
+    else                    smfPlayerGotoSong(1);
     return;
   }
   if (currentMode == PLAY_MODE) {
@@ -4245,6 +4690,15 @@ void handleButtonBAction() {
     }
     updateDirectButtonLabels();
     setCurrentTransposeButton();
+    needFullRedraw = true;
+  } else if (currentMode == INSTANT_MODE) {
+    // B: 転調値を 0 にリセット（Instant の「0」ボタンと同じ動作）
+    handleTransposeChange(0);
+    needFullRedraw = true;
+  } else if (currentMode == SEQUENCE_MODE) {
+    // B: 「右(次ステップ)」と同じ＝次の転調設定へ進む
+    seqCurrentStep = (seqCurrentStep < SEQ_STEP_COUNT - 1) ? seqCurrentStep + 1 : 0;
+    handleTransposeChange(seqPatterns[seqCurrentPattern][seqCurrentStep]);
     needFullRedraw = true;
   } else if (currentMode == KEY_MODE) {
     majorUpperTranspose = !majorUpperTranspose;
@@ -4279,23 +4733,8 @@ void handleButtonCShortAction() {
   }
 #endif
   if (currentMode == SMF_PLAYER_MODE) {
-    // 次曲へ（再生中なら止めてから次再生、停止中ならファイル選択のみ）
-    if (g_smfState == SMF_PLAYING) {
-      smfPlayerStopPlaying();
-      const char* nx = smfPlayerMakeFilename(1);
-      if (nx) {
-        strncpy(g_smfCurrentFilename, nx, SMF_MAX_FILENAME);
-        g_smfCurrentFilename[SMF_MAX_FILENAME - 1] = '\0';
-      }
-      smfPlayerStartPlaying();
-    } else {
-      const char* nx = smfPlayerMakeFilename(1);
-      if (nx) {
-        strncpy(g_smfCurrentFilename, nx, SMF_MAX_FILENAME);
-        g_smfCurrentFilename[SMF_MAX_FILENAME - 1] = '\0';
-      }
-      drawSmfPlayerScreen();
-    }
+    // C は短押しも長押しもモード切替に統一（曲送りは B、再生/停止は ▶/■ へ移譲）。
+    handleButtonCLongAction();
     return;
   }
   advanceSubMode();
@@ -4329,8 +4768,8 @@ void dispatchTouchPoint(TouchPoint_t pos) {
   } else if (currentMode == SEQUENCE_MODE) {
     processSequenceModeTouch(pos);
   } else if (currentMode == SMF_PLAYER_MODE) {
-    // SMF Player はタッチ操作なし（A/B/C ボタンで操作）
-    (void)pos;
+    // ▶/■ トランスポート操作と、便利な即選曲画面のタッチ
+    processSmfPlayerTouch(pos);
   } else {
     processMidiManageTouch(pos);
   }

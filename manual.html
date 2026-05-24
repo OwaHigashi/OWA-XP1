@@ -360,6 +360,9 @@
     SD カードの <code>/smf</code> または <code>/SMF</code> フォルダにある <code>.mid</code> / <code>.smf</code> ファイルを再生します。
     <b>16 チャンネルの鍵盤を画面下部に表示</b>し、再生中は Note On に応じてキーが緑 (白鍵) / オレンジ (黒鍵) で点灯します。
     System Exclusive メッセージにも対応しており、ペイロードはそのまま MIDI OUT (Unit MIDI) に流れます。
+    <b>再生 / 停止は画面右上の <span style="color:#2e7d32">▶</span> (再生) / <span style="color:#b71c1c">■</span> (停止) をタッチ</b>して行います。
+    <span class="btn-icon A">A</span>=曲戻り / <span class="btn-icon B">B</span>=曲送り、いずれかの<b>長押しで「便利な即選曲」画面</b>(フォルダブラウザ) が開き、サブフォルダをたどって曲を選べます。
+    <span class="btn-icon C">C</span> は短押し・長押しともに<b>モード切り替え</b>専用です。
   </p>
 
   <div class="pair">
@@ -367,42 +370,59 @@
       <div class="frame">
         <img src="screenshots/09-smf-stop.png" alt="SMF Player 停止中">
       </div>
-      <figcaption>図 2.5-1: SMF プレーヤー (停止中)。右上に停止アイコン (白い四角)。</figcaption>
+      <figcaption>図 2.5-1: SMF プレーヤー (停止中)。右上に ▶ (緑=再生可) / ■ のタッチ式トランスポート。</figcaption>
     </figure>
     <figure class="shot">
       <div class="frame">
         <img src="screenshots/10-smf-playing.png" alt="SMF Player 再生中">
       </div>
-      <figcaption>図 2.5-2: SMF プレーヤー (再生中)。右上に黄色い再生三角。下部に 16 ch 鍵盤。</figcaption>
+      <figcaption>図 2.5-2: SMF プレーヤー (再生中)。右上 ■ が赤 (停止可)。下部に 16 ch 鍵盤。</figcaption>
     </figure>
   </div>
 
   <h3>使い方</h3>
   <ol>
-    <li>microSD カードに <code>/smf</code> (または <code>/SMF</code>) フォルダを作り、<code>.mid</code> / <code>.smf</code> ファイルを入れる。</li>
+    <li>microSD カードに <code>/smf</code> (または <code>/SMF</code>) フォルダを作り、<code>.mid</code> / <code>.smf</code> ファイルを入れる。サブフォルダで整理しても OK。</li>
     <li>本体起動後、<b>PLAY モード</b>で <span class="btn-icon C">C</span> を <b>短押し</b> → SMF プレーヤー画面が開く (初回はスキャンに数秒かかる)。</li>
-    <li><span class="btn-icon A">A</span> で前曲、<span class="btn-icon C">C</span> 短押しで次曲を選ぶ。</li>
-    <li><span class="btn-icon B">B</span> で再生 / 停止 をトグル。</li>
-    <li>戻るには <span class="btn-icon C">C</span> を <b>長押し</b>。再生中は自動で停止し All Notes Off を送ります。</li>
+    <li>画面右上の <span style="color:#2e7d32"><b>▶</b></span> をタッチで<b>再生</b>、<span style="color:#b71c1c"><b>■</b></span> をタッチで<b>停止</b>。</li>
+    <li><span class="btn-icon A">A</span> で<b>曲戻り</b>、<span class="btn-icon B">B</span> で<b>曲送り</b>。再生中に押すとそのまま新しい曲を続けて再生。</li>
+    <li><span class="btn-icon A">A</span> または <span class="btn-icon B">B</span> を <b>長押し</b> → <b>便利な即選曲画面</b>(フォルダブラウザ) が開く。フォルダをタッチで開き、曲をタッチで即再生。<code>[..]</code> で 1 階層戻る。<code>&lt;&lt;</code> / <code>&gt;&gt;</code> でページ送り、右上 <code>X</code> で閉じる。</li>
+    <li>音量は<b>画面下部のバーをタッチ</b>して調整 (左端=0 / 右端=最大)。本体に物理ボリュームが無いため、ここで音源全体の音量を変えます。</li>
+    <li>別モードへ移るには <span class="btn-icon C">C</span> (短押し・長押しどちらでも)。再生中は自動で停止し All Notes Off を送ります。</li>
   </ol>
 
   <h3>操作早見表</h3>
   <table>
     <tr><th>操作</th><th>働き</th></tr>
-    <tr><td><span class="btn-icon A">A</span> 短押し</td><td>前の曲へ (再生中なら次の曲も自動再生)</td></tr>
-    <tr><td><span class="btn-icon B">B</span> 短押し</td><td>再生 / 停止トグル</td></tr>
-    <tr><td><span class="btn-icon C">C</span> 短押し</td><td>次の曲へ (再生中なら次の曲も自動再生)</td></tr>
-    <tr><td><span class="btn-icon C">C</span> 長押し</td><td>SMF プレーヤーを抜けて PLAY モードへ戻る</td></tr>
+    <tr><td>画面右上 <span style="color:#2e7d32"><b>▶</b></span> タッチ</td><td>再生</td></tr>
+    <tr><td>画面右上 <span style="color:#b71c1c"><b>■</b></span> タッチ</td><td>停止</td></tr>
+    <tr><td><span class="btn-icon A">A</span> 短押し</td><td>曲戻り (再生中なら新しい曲も続けて再生)</td></tr>
+    <tr><td><span class="btn-icon B">B</span> 短押し</td><td>曲送り (再生中なら新しい曲も続けて再生)</td></tr>
+    <tr><td><span class="btn-icon A">A</span> / <span class="btn-icon B">B</span> 長押し</td><td>便利な即選曲画面 (フォルダブラウザ) を開く / 閉じる</td></tr>
+    <tr><td>画面下部のバー タッチ</td><td>マスターボリューム調整 (左端=0 / 右端=127)</td></tr>
+    <tr><td><span class="btn-icon C">C</span> 短押し・長押し</td><td>モード切り替え (SMF プレーヤーを抜けて PLAY モードへ)</td></tr>
+  </table>
+
+  <h3>便利な即選曲画面 (フォルダブラウザ)</h3>
+  <table>
+    <tr><th>操作</th><th>働き</th></tr>
+    <tr><td><code>[DIR] 名前/</code> をタッチ</td><td>そのサブフォルダを開く</td></tr>
+    <tr><td><code>[..] up</code> をタッチ</td><td>1 階層上のフォルダへ戻る</td></tr>
+    <tr><td>曲名をタッチ</td><td>その曲を即再生 (このフォルダが曲送り/戻りの対象になる)</td></tr>
+    <tr><td>上部 <code>&lt;&lt;</code> / <code>&gt;&gt;</code> (または <span class="btn-icon A">A</span>/<span class="btn-icon B">B</span> 短押し)</td><td>ページ送り</td></tr>
+    <tr><td>右上 <code>X</code></td><td>選曲画面を閉じてプレーヤーへ戻る</td></tr>
   </table>
 
   <div class="callout">
     <b class="label">仕様メモ</b>
     <ul style="margin:.4em 0 0 1.2em">
       <li>SMF パーサは <code>MD_MIDIFile</code> ライブラリ (リポジトリ <code>src/MD_MIDIFile/</code> に同梱、移植元: <code>../M5Core2-SMF-Player</code>) を使用</li>
-      <li>曲が終わると自動で次曲へ進みます</li>
+      <li>曲が終わると自動で次曲へ進みます (曲送り/戻りは現在再生中の曲があるフォルダ内で循環)</li>
+      <li>選曲画面は <code>/smf</code> (基底) より上の階層へは移動しません</li>
       <li>SMF プレーヤー入室時に SD バスを <code>SD.h</code> から <code>SdFat</code> に譲渡し、退出時に戻します。
         滞在中はシーケンスパターンの SD 保存などが一時停止します。</li>
-      <li>タッチ操作はありません (A/B/C ボタンのみ)</li>
+      <li>再生 / 停止と選曲はタッチ、曲送り/戻りと選曲画面の開閉は <span class="btn-icon A">A</span>/<span class="btn-icon B">B</span> ボタンで操作します</li>
+      <li>画面下部のボリュームバーは <b>GM ユニバーサル Master Volume SysEx</b> (<code>F0 7F 7F 04 01 00 vol F7</code>) で Unit MIDI 全体の音量を設定。曲ごとの CC7 (チャンネルボリューム) には触れないのでミックスは保たれます。曲頭の GM リセット対策として再生開始の約 0.8 秒後に再送します</li>
     </ul>
   </div>
 </section>
@@ -468,7 +488,7 @@
   <table>
     <tr><th>表示</th><th>意味</th></tr>
     <tr><td><code>A:AllOff</code></td><td>A ボタンで All Notes Off の動作を切り替えられる、という意味</td></tr>
-    <tr><td><code>B:Action</code></td><td>B ボタンの現在の役割 (画面ごとに変化)</td></tr>
+    <tr><td><code>B:Range</code> / <code>B:Zero</code> / <code>B:Next</code> など</td><td>B ボタンの現在の役割 (画面ごとに変化)。転調モードでは DIRECT=レンジ切替 (<code>B:Range</code>) / INSTANT=転調を <code>0</code> にリセット (<code>B:Zero</code>) / SEQUENCE=次のステップへ (<code>B:Next</code>)</td></tr>
     <tr><td><code>C:N</code></td><td>C ボタンに割当中の動作の略称</td></tr>
     <tr><td><code>I:○</code></td><td>受信した MIDI メッセージ数</td></tr>
     <tr><td><code>O:○</code></td><td>送信した MIDI メッセージ数</td></tr>
@@ -494,14 +514,14 @@
     <span class="tag long">C 長押し</span> でグループを巡回します (PLAY → 転調 → MIDI 管理 → PLAY)。<br>
     <span class="tag short">C 短押し</span> で同じグループ内のモードを順送りします。
     <b>PLAY モードでは <span class="tag short">C 短押し</span> が SMF プレーヤー入口</b>になります。
-    SMF プレーヤー中は <span class="tag long">C 長押し</span> で PLAY に戻ります。
+    SMF プレーヤー中は <span class="btn-icon C">C</span> (短押し・長押しどちらでも) で PLAY に戻ります。
   </p>
 
   <h2>5.2 グループ内のモード遷移</h2>
   <div class="grid cols-4">
     <div class="card">
       <h3>演奏グループ</h3>
-      <p style="font-size:1.05rem"><b>PLAY</b> ⇄ <b>SMF プレーヤー</b> (PLAY で C 短押し / SMF で C 長押し)</p>
+      <p style="font-size:1.05rem"><b>PLAY</b> ⇄ <b>SMF プレーヤー</b> (PLAY で C 短押し / SMF で C 押しで PLAY へ)</p>
     </div>
     <div class="card">
       <h3>転調グループ (C 短押しで巡回)</h3>
@@ -514,8 +534,8 @@
       <p style="font-size:1.05rem"><b>FILTER</b> ⇄ <b>MAPPER</b></p>
     </div>
     <div class="card">
-      <h3>SMF プレーヤー (A/B/C 専用)</h3>
-      <p style="font-size:1.05rem"><b>A</b>=前曲 / <b>B</b>=再生停止 / <b>C 短押し</b>=次曲 / <b>C 長押し</b>=PLAY へ</p>
+      <h3>SMF プレーヤー</h3>
+      <p style="font-size:1.05rem">再生/停止=右上 <b>▶</b>/<b>■</b> タッチ / <b>A</b>=曲戻り・<b>B</b>=曲送り / <b>A・B 長押し</b>=即選曲画面 / 下部バー=音量 / <b>C</b>=モード切替</p>
     </div>
   </div>
   <div class="callout tip">
@@ -670,7 +690,8 @@
     <code>0</code> / <code>+1</code> / <code>+2</code> / <code>+3</code> / <code>+5</code> /
     <code>-1</code> / <code>-2</code> / <code>-3</code> / <code>-5</code>
   </p>
-  <p>原調 (<code>0</code>) はステージング中に「素のキーへ戻る」ためのリセットボタンとしても使えます。</p>
+  <p>原調 (<code>0</code>) はステージング中に「素のキーへ戻る」ためのリセットボタンとしても使えます。
+  画面下の <b>B ボタン</b> を押しても同じく転調値を <code>0</code> にリセットできます (ヒント表示は <code>B:Zero</code>)。</p>
 
   <div class="callout tip">
     <b class="label">向いている場面</b>
@@ -685,6 +706,7 @@
     <b>転調値の並び (パターン)</b> を作っておき、ステップごとに切り替えていけるモードです。
     曲の進行 (例: A メロ → サビ → 転調サビ) をあらかじめ仕込んでおけます。
   </p>
+  <p>画面下の <b>B ボタン</b> を押すと、画面右の「次」ボタン (右ペダル) と同じく <b>次のステップへ</b> 進みます (ヒント表示は <code>B:Next</code>)。</p>
 
   <figure class="shot">
     <div class="frame">

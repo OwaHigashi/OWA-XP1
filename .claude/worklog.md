@@ -186,3 +186,101 @@ SysEx メッセージにも対応。
   ../M5Core2-PuyoVaders(release 発火)は非該当。詳細は FilBT 側 worklog 参照。
 - bin 更新: 再コンパイル済みで SDimg/00MIDIXposeFilBTUM-Black.bin はこの修正を含む
   (1,415,408 B, 2026-05-24)。
+
+### SMF プレーヤー(16ch 鍵盤表示)操作インタフェース刷新
+
+意図: `C` ボタンを「モード切り替え専用」に統一したい。従来 SMF 画面で `C` が
+曲操作に使われていた競合を解消する。
+
+新しい割り当て(SMF プレーヤー画面):
+
+- 再生 / 停止 = 画面右上の ▶(再生) / ■(停止) **タッチボタン**へ移譲
+  (停止中は ▶ が緑、再生中は ■ が赤で点灯)。
+- `A` 短押し = 曲戻り / `B` 短押し = 曲送り(再生中なら新しい曲を続けて再生、
+  停止中は選曲のみ)。
+- `A` / `B` **長押し** = 「便利な即選曲」画面(フォルダブラウザ)の開閉。
+  サブフォルダをたどれる。`[..]` で 1 階層上、`<<`/`>>`(または `A`/`B`)で
+  ページ送り、曲タッチで即再生、右上 `X` で閉じる。基底 `/smf` より上には
+  行かない。選曲したフォルダが以後の曲送り/戻りの対象になる。
+- `C` 短押し・長押し = いずれもモード切替(SMF を抜けて PLAY へ)。
+
+実装ポイント:
+
+- `g_smfFolder` を `const char*` → `char[SMF_MAX_PATH]` 化。基底フォルダ
+  `g_smfBaseFolder` と閲覧フォルダ `g_smfBrowseDir` を追加。
+- スキャンを汎用化: `smfPlayerLoadSongsFromFolder()`(曲のみ) と
+  `smfPlayerScanBrowseDir()`(フォルダ→曲の順で `g_smfEntries[]` に列挙)。
+- ブラウザ表示中はメインループの鍵盤差分描画と再生/停止時の再描画を抑止
+  (`g_smfBrowserActive` ガード、`smfPlayerRefreshScreen()`)。曲は裏で
+  鳴り続けられる。
+- `processHardwareButtons()`: SMF 時のみ `A`/`B` も release エッジ短押し +
+  700ms 長押し方式に(他モードは従来の `wasPressed` 即時動作のまま)。
+- タッチ: `dispatchTouchPoint()` の SMF 分岐を `processSmfPlayerTouch()` に接続。
+- コンパイル OK (core 2.1.4, 1,412,885 B / 21%, グローバル +約7KB は
+  `g_smfEntries[200]` 分)。
+
+ドキュメント: README.md / manual.html の SMF 操作節・操作早見表・ナビ要約・
+図キャプションを更新。スクリーンショット(09/10)は新トランスポート反映のため
+要再キャプチャ(`scripts/capture_smf_screenshots.ps1`)。
+
+### 横断影響(他モデル)
+
+- SMF プレーヤーのコードを共有するのは非UM版 `../M5Core2-MIDIXposeFilBT`
+  (synth=0)のみ(Tab 系・他ゲームは非共有、`OLD/` は旧バックアップ)。
+- **今回は本 UM 版のみ実装**(ユーザー指示)。非UM版は未適用。移植する場合の
+  注意: 非UM版は `MIDIXPOSE_HAS_LOCAL_SYNTH=0` でモード遷移経路が異なり、
+  SMF は群サイクルに含まれる(`C` でのモード切替先が PLAY ではなく転調群)。
+  `handleButtonCLongAction()` の `#if` 分岐がそのまま効くので C 統一はそのまま
+  移植可能だが、A/B 長押しブラウザとタッチ移譲は同一に移植してよい。
+
+### SMF 選曲画面の鍵盤残像修正 + タッチ式マスターボリューム
+
+実機フィードバック2件への対応(本UM版のみ、非UM版未適用):
+
+1. **選曲画面の鍵盤残像**: 鍵盤差分描画ガード(`if(!g_smfBrowserActive)`)自体は
+   効いていたが、「開いた瞬間の1フレームだけ残る」。鍵盤→選曲画面の遷移フレームで
+   紛れ込む残像と判断。`smfBrowserOpen()` で `g_smfBrowserSettle=3` をセットし、
+   `smfPlayerProcessLoop()` で選曲表示中の最初の3ティックだけ `drawSmfBrowserScreen()`
+   を描き直して残像をクリア(以降はガードで描かない)。切り分け用に open/close の
+   Serial ログも追加。
+2. **タッチ式マスターボリューム**: 端末に物理ボリュームが無い(Unit MIDI 出力は
+   Core2 スピーカーを経由しない)ため、プレーヤー画面下部(y=224)に横バーを追加。
+   左端=0 / 右端=127 をタッチで設定。**GM ユニバーサル Master Volume SysEx**
+   `F0 7F 7F 04 01 00 vol F7` で全体音量を変更(曲ごとの CC7 には触れずミックス維持)。
+   `g_masterVolume` 保持。曲頭の GM リセットが音量を最大に戻すので、再生開始の
+   即時送出に加え 800ms 後に再送(`g_smfVolumeResendAt`)。`smfPlayerEnter()` でも送出。
+   **要実機検証**: SAM2695 が Universal Master Volume を honor するか。効かない場合の
+   代替は全16chへ CC7 送出(ただし SMF の CC7 と競合)。コンパイル OK
+   (core 2.1.4, 1,413,545 B / 21%)。FLASH 済 COM16。
+   ドキュメント(README/manual)は音量の実機動作確認後に確定更新予定。
+
+### 実機確認OK → 非UM版へ横展開 + bin/SDimg 更新
+
+ユーザー実機で残像解消・ボリューム動作とも確認OK。以下を実施:
+
+- **ドキュメント確定**: UM 版 README.md / manual.html に音量バー(GM Master Volume SysEx)を追記。
+- **非UM版 (../M5Core2-MIDIXposeFilBT) へポーティング**: UM の SMF 改修差分を
+  `git diff HEAD -- *.ino` でパッチ化し、非UM へ `git apply`。機種差(synth=0 /
+  MIDIピン13・14 / スプラッシュ文言 / Wire.end・pinMode 無し / TESTTONE トグル無し)
+  には一切触れずに SMF 改修だけを移植。2方向 diff で検証済:
+  (a) 非UM新 vs 非UM旧 = SMF改修のみ(588行); (b) 非UM新 vs UM = 既知の機種差9点のみ。
+  非UM の MIDI_MAX_TRACKS は既に 32(同期済)。非UM の README/manual も更新
+  (入退室は転調群サイクル経由・C で転調へ戻る、と非UM 仕様に合わせて記述)。
+- **bin 作成 & SDimg 更新**:
+  - UM: 1,419,840 B → `SDimg/00MIDIXposeFilBTUM-Black.bin`(デバイス焼込みと同一)。
+  - 非UM: 1,419,600 B → `SDimg/00MIDIXposeFilBT-Gray.bin`。
+  - 両 repo の `build/*.ino.bin` も更新。
+- 非UM側の詳細は `../M5Core2-MIDIXposeFilBT/.claude/worklog.md` にも記録。
+
+### SD カード作成ツール + マニュアル PDF (D:\M5 直下)
+
+- **`D:\M5\SDimg-COPY.bat`**: SDimg を SD カードへ完全同期(ミラー)するワンクリック
+  バッチ。引数なし=F:、引数でドライブ変更可 (`SDimg-COPY.bat E`)。robocopy /MIR で
+  コピー+余分削除。実行前に対象ドライブ確認 + choice 確認、ドライブ非存在なら安全終了。
+- **マニュアル PDF**: 各ツールの `manual.html` を headless Edge で PDF 化し
+  `SDimg/TOOL-DOC/` に配置 (`M5Core2-MIDIXposeFilBTUM_manual.pdf` /
+  `M5Core2-MIDIXposeFilBT_manual.pdf`)。**今後 manual.html 更新時は PDF も再生成**
+  (ユーザー指示)。再生成用に **`D:\M5\MANUAL-PDF.bat`** を用意 (両 manual.html →
+  TOOL-DOC PDF をワンクリック)。
+- **ハマりどころ**: .bat は UTF-8/LF だと cmd が誤読(`%~dp0` 空・行崩れ)。
+  **Shift-JIS(CP932)+CRLF** + `chcp 932` で保存し直して解決。両バッチとも動作確認済。
