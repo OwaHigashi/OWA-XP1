@@ -1459,6 +1459,25 @@ static constexpr char UPD_LIST_FILE[]    = "/downloadlist.txt"; // last applied 
 static const int UPD_CX = 224, UPD_CY = 206, UPD_CW = 90, UPD_CH = 30;
 static int gUpdFails = 0;  // count of failed U: downloads (reported at the end)
 
+// Serial-injected tap (for scriptable screenshots/automation of update mode).
+// Set by the "UPDTAP x y" serial command; consumed once by updGetTap().
+static volatile int gInjTapX = -1, gInjTapY = -1;
+
+// True once update mode is running. sendUsbSerialScreenshot() checks this so it
+// captures the live update-mode screen instead of redrawing the normal UI.
+static volatile bool gUpdateModeActive = false;
+
+// "Boot straight into update mode" flag, kept in RTC memory so it survives the
+// ESP.restart() that the UPDATEMODE serial command triggers. Entering update
+// mode from a fresh boot (BEFORE Bluetooth init) is the only way Wi-Fi scanning
+// works reliably -- entering live from normal mode leaves Bluedroid holding the
+// radio, which makes WiFi.scanNetworks() return 0.
+static constexpr uint32_t UPD_BOOT_MAGIC = 0x55504431;  // 'UPD1'
+// RTC_NOINIT (not RTC_DATA): RTC_DATA/.rtc.bss is zeroed by startup on a SW
+// reset, which would lose the flag. RTC_NOINIT survives esp_restart() and is
+// only undefined on a cold power-on (the magic check guards that).
+RTC_NOINIT_ATTR uint32_t gBootToUpdate;
+
 static void updDrawCancel() {
   M5.Lcd.fillRoundRect(UPD_CX, UPD_CY, UPD_CW, UPD_CH, 4, TFT_RED);
   M5.Lcd.setTextColor(TFT_WHITE, TFT_RED);
@@ -1471,6 +1490,12 @@ static inline bool updCancelHit(const TouchPoint_t &p) {
 
 // One-shot tap detector (press edge). Independent of the normal processTouch().
 static bool updGetTap(TouchPoint_t &out) {
+  // Serial-injected tap (UPDTAP) takes priority, consumed once.
+  if (gInjTapX >= 0) {
+    out.x = gInjTapX; out.y = gInjTapY;
+    gInjTapX = -1; gInjTapY = -1;
+    return true;
+  }
   static bool was = false;
   TouchPoint_t p = M5.Touch.getPressPoint();
   bool now = (p.x != -1 && p.y != -1);
@@ -1508,6 +1533,15 @@ static void updMaybeScreenshot() {
   if (line.startsWith("SCREENSHOT")) {
     int sp = line.indexOf(' ');
     sendUsbSerialScreenshot(sp > 0 ? line.c_str() + sp + 1 : nullptr);
+  } else if (line.startsWith("UPDTAP")) {
+    // "UPDTAP x y" -> inject a tap (for scriptable navigation/screenshots).
+    int s1 = line.indexOf(' ');
+    int s2 = (s1 > 0) ? line.indexOf(' ', s1 + 1) : -1;
+    if (s2 > 0) {
+      gInjTapX = line.substring(s1 + 1, s2).toInt();
+      gInjTapY = line.substring(s2 + 1).toInt();
+      Serial.println("OK UPDTAP");
+    }
   }
 }
 
@@ -1958,6 +1992,7 @@ static void updForceBootAndRestart() {
 
 // Orchestrator. Never returns (always reboots).
 static void runUpdateMode() {
+  gUpdateModeActive = true;   // so SCREENSHOT captures the live update screen
   gUpdFails = 0;
   M5.Lcd.setBrightness(200);
   M5.Lcd.fillScreen(TFT_BLACK);
@@ -2026,6 +2061,13 @@ static void runUpdateMode() {
 void setup() {
   M5.begin(true, true, true, true);
   Serial.begin(115200);            // early, so the entry gate can log to USB serial
+
+  // Reboot-into-update-mode (set by the UPDATEMODE serial command). Checked here,
+  // BEFORE Bluetooth init, so Wi-Fi works (Bluedroid would otherwise hold radio).
+  if (gBootToUpdate == UPD_BOOT_MAGIC) {
+    gBootToUpdate = 0;
+    runUpdateMode();
+  }
 
   // Boot order: M5StackUpdater FIRST (hold BtnA here to roll back to the
   // launcher menu), THEN the splash. Holding the center button (B) during the
@@ -5535,10 +5577,14 @@ void sendUsbSerialScreenshot(const char* formatToken) {
 
   // LCD に直接描画したものを GRAM から読み戻す。
   // PSRAM スプライトは使わない (公式 M5Stack screenServer.ino と同方針)。
-  needFullRedraw = false;
-  needPartialUpdate = false;
-  drawInterface();
-  delay(150);
+  // 更新モード中は通常UIを再描画すると更新画面が消えるのでスキップし、
+  // すでに描かれている更新画面をそのまま読み出す。
+  if (!gUpdateModeActive) {
+    needFullRedraw = false;
+    needPartialUpdate = false;
+    drawInterface();
+    delay(150);
+  }
 
   const size_t totalBytes = (size_t)SCREEN_WIDTH * SCREEN_HEIGHT * 3;
 
@@ -5774,6 +5820,18 @@ void handleUsbSerialCommand(char* line) {
   if (tokenEqualsIgnoreCase(command, "SCREENSHOT")) {
     char* format = strtok_r(nullptr, " \t", &savePtr);
     sendUsbSerialScreenshot(format);
+    return;
+  }
+
+  if (tokenEqualsIgnoreCase(command, "UPDATEMODE")) {
+    // Reboot into update mode via an RTC flag so it is entered at the start of
+    // setup(), BEFORE Bluetooth init -- otherwise Bluedroid holds the radio and
+    // WiFi.scanNetworks() returns 0. (For documentation/automation.)
+    Serial.println("OK rebooting into update mode");
+    Serial.flush();
+    gBootToUpdate = UPD_BOOT_MAGIC;
+    delay(100);
+    ESP.restart();
     return;
   }
 
