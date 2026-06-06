@@ -15,6 +15,10 @@
 #include "src/MD_MIDIFile/MD_MIDIFile.h"
 #include <Free_Fonts.h>
 
+// Wi-Fi SD-image OTA updater (entered by holding A+B+C at boot splash).
+#include <WiFi.h>
+#include <HTTPClient.h>
+
 // 内蔵音源 (M5 Unit MIDI 内蔵 SAM2695) の有無を 1/0 で指定する。
 // 1 のときだけ PLAY モード (本体が直接発音するモード) が有効になる。
 // 外付け MIDI Module2 (本体に音源なし) など内蔵音源が無いハード構成では、
@@ -1323,7 +1327,11 @@ void key_callback(uint8_t *p_msg)
 // frame, deco lines with corner accent dots, faded title, subtitle, progress
 // bar, footer. Geometry/font scaled down for the 320×240 panel; animation
 // timing, fade math, and progress-bar logic match Tab5's drawSplash() 1:1.
-static void showSplashScreen() {
+// Returns true if the center button (B) is pressed at any point during the
+// splash -> the caller enters Wi-Fi update mode. (A+B+C can't be used: the
+// Core2 FT6336 blends side-by-side bottom-row touches into one point, so only a
+// single bottom button reads reliably.)
+static bool showSplashScreen() {
   const int W = SCREEN_WIDTH;
   const int H = SCREEN_HEIGHT;
   const int cx = W / 2;
@@ -1352,6 +1360,10 @@ static void showSplashScreen() {
   M5.Lcd.setTextColor(0x6B4D, TFT_BLACK);
   M5.Lcd.drawString("for M5Stack Core2 (Unit MIDI on Port A)", cx, cy + 66);
 
+  // Subtle hint: hold the center button (B) during the splash to update.
+  M5.Lcd.setTextColor(0x4A49, TFT_BLACK);
+  M5.Lcd.drawString("hold [B] for Wi-Fi firmware update", cx, cy + 86);
+
   const int pbW = 200;
   const int pbH = 6;
   const int pbX = cx - pbW / 2;
@@ -1368,6 +1380,15 @@ static void showSplashScreen() {
   uint16_t lastTitleCol = 0xFFFE;
 
   while (true) {
+    M5.update();                       // keep button/touch state fresh
+
+    // Enter update mode if B is held (object press OR a raw touch in the
+    // bottom-center band where the printed B circle sits).
+    TouchPoint_t tp = M5.Touch.getPressPoint();
+    if (M5.BtnB.isPressed() || (tp.x >= 100 && tp.x <= 220 && tp.y >= 200)) {
+      return true;
+    }
+
     uint32_t e = millis() - startMs;
     if (e >= totalMs) break;
 
@@ -1390,19 +1411,636 @@ static void showSplashScreen() {
     }
     delay(16);
   }
+  return false;
+}
+
+// ============================================================================
+//  Wi-Fi SD-image OTA updater
+//  Entered by holding the center button (B) during the boot entry gate.
+//  This is a fully independent mode: no MIDI, no Bluetooth, no normal loop()
+//  runs. The screen shows only progress + Cancel (and Power Off / Reboot on
+//  terminal screens). The device downloads a plain-text, VERSIONED changelog
+//  manifest, applies only the entries newer than what it last applied, then
+//  force-flashes the firmware via M5Stack-SD-Updater and reboots.
+//
+//  Manifest format (downloadlist.txt) -- '#' line = version marker, others are
+//  entries; blank lines ignored. The FIRST line MUST be "#<latest>" (the newest
+//  version integer); below it the changelog blocks are listed OLDEST -> NEWEST,
+//  each headed by its own "#<n>":
+//
+//      #5                <- header: latest version is 5 (quick "am I current?")
+//      #1
+//      U:00MIDIXposeFilBTUM-Black.bin   (download <BASE>/path -> SD /path)
+//      U:smf/hoge.mid
+//      #2
+//      E:gege.bin                       (delete SD /gege.bin)
+//      #5
+//      U:jpg/new.jpg
+//
+//  The device remembers its version as the first line of the SAVED
+//  /downloadlist.txt on the SD card. On entry it downloads the new manifest and:
+//    - if the new first-line version == the saved version -> "Up to date", nothing.
+//    - else it applies, in file order, every U:/E: entry whose enclosing "#<n>"
+//      block is GREATER than the saved version (so a device several versions
+//      behind never skips an intermediate release). On success it saves the new
+//      manifest as /downloadlist.txt (recording the new version).
+//  If the manifest itself cannot be fetched (e.g. 404) -> "No Updater" screen.
+//  No compression anywhere.
+// ============================================================================
+
+static constexpr char UPD_MANIFEST_URL[] = "http://west.yokohama/OWA-1/XP1/downloadlist.txt";
+static constexpr char UPD_BASE_URL[]     = "http://west.yokohama/OWA-1/XP1/SDimg/";
+static constexpr char UPD_BOOT_BIN[]     = "/00MIDIXposeFilBTUM-Black.bin";
+static constexpr char UPD_PART_FILE[]    = "/download.part";    // per-file download temp (mv to dest)
+static constexpr char UPD_NEW_FILE[]     = "/downloadlist.new"; // freshly downloaded manifest (transient)
+static constexpr char UPD_LIST_FILE[]    = "/downloadlist.txt"; // last applied manifest (first line = current version)
+
+// On-screen Cancel button (shared across all update-mode screens).
+static const int UPD_CX = 224, UPD_CY = 206, UPD_CW = 90, UPD_CH = 30;
+static int gUpdFails = 0;  // count of failed U: downloads (reported at the end)
+
+static void updDrawCancel() {
+  M5.Lcd.fillRoundRect(UPD_CX, UPD_CY, UPD_CW, UPD_CH, 4, TFT_RED);
+  M5.Lcd.setTextColor(TFT_WHITE, TFT_RED);
+  uiFontSmall();
+  uiDrawC("Cancel", UPD_CX, UPD_CY, UPD_CW, UPD_CH);
+}
+static inline bool updCancelHit(const TouchPoint_t &p) {
+  return touchInRect(p, UPD_CX, UPD_CY, UPD_CW, UPD_CH);
+}
+
+// One-shot tap detector (press edge). Independent of the normal processTouch().
+static bool updGetTap(TouchPoint_t &out) {
+  static bool was = false;
+  TouchPoint_t p = M5.Touch.getPressPoint();
+  bool now = (p.x != -1 && p.y != -1);
+  if (now && !was) { was = true; out = p; return true; }
+  if (!now) was = false;
+  return false;
+}
+
+// Simple centered message screen (supports a single '\n' for two lines).
+static void updMsg(const char *text, uint16_t color) {
+  M5.Lcd.fillScreen(TFT_BLACK);
+  uiFontMedium();
+  M5.Lcd.setTextColor(color, TFT_BLACK);
+  M5.Lcd.setTextDatum(MC_DATUM);
+  const char *nl = strchr(text, '\n');
+  if (nl) {
+    char line1[64];
+    int n = nl - text; if (n > 63) n = 63;
+    memcpy(line1, text, n); line1[n] = 0;
+    M5.Lcd.drawString(line1, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 - 14);
+    M5.Lcd.drawString(nl + 1, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 14);
+  } else {
+    M5.Lcd.drawString(text, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
+  }
+}
+
+// During update mode the normal loop() (and its serial command parser) does not
+// run, so poll USB serial here for the SCREENSHOT command. This lets the updater
+// screens be captured for the manual exactly like the rest of the app. Call it
+// from every update-mode polling loop right after M5.update().
+static void updMaybeScreenshot() {
+  if (!Serial.available()) return;
+  String line = Serial.readStringUntil('\n');
+  line.trim();
+  if (line.startsWith("SCREENSHOT")) {
+    int sp = line.indexOf(' ');
+    sendUsbSerialScreenshot(sp > 0 ? line.c_str() + sp + 1 : nullptr);
+  }
+}
+
+// ---- Wi-Fi scan + SSID selection ------------------------------------------
+// Returns the chosen network index and fills outSsid, or -1 if no networks.
+// A Cancel tap reboots (does not return).
+static int updWifiScanAndSelect(String &outSsid) {
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+
+  updMsg("Scanning Wi-Fi...", TFT_CYAN);
+  // Thorough active scan: 400 ms/channel finds more APs than the short default.
+  // NOTE: the ESP32 radio is 2.4 GHz only -- 5 GHz SSIDs never appear.
+  int n = WiFi.scanNetworks(false /*async*/, false /*hidden*/, false /*passive*/, 400);
+  if (n <= 0) return -1;
+
+  // Big reverse-video cursor list: UP/DOWN move the highlight, SELECT confirms.
+  // Only `rows` are visible at once but ALL n networks are reachable by scrolling.
+  const int rows  = 6;          // visible rows (the list scrolls for more)
+  const int rowH  = 26;
+  const int listY = 28;
+  // Bottom button bar: [UP] [DOWN] [SELECT] [Cancel]
+  const int byTop = 190, bH = 44, bW = 76;
+  const int upX = 4, dnX = 84, selX = 164, caX = 244;
+
+  int sel = 0;     // highlighted network index
+  int top = 0;     // first visible index
+  bool dirty = true;
+
+  while (true) {
+    if (dirty) {
+      if (sel < top) top = sel;
+      if (sel >= top + rows) top = sel - rows + 1;
+
+      M5.Lcd.fillScreen(TFT_BLACK);
+      uiFontSmall();
+      M5.Lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+      char hdr[48];
+      snprintf(hdr, sizeof(hdr), "Wi-Fi %d/%d  (UP/DOWN scroll)", sel + 1, n);
+      uiDrawL(hdr, 8, 6);
+
+      for (int i = 0; i < rows; i++) {
+        int idx = top + i;
+        if (idx >= n) break;
+        int y = listY + i * rowH;
+        bool cur = (idx == sel);
+        uint16_t bg = cur ? TFT_CYAN : TFT_BLACK;
+        uint16_t fg = cur ? TFT_BLACK : TFT_WHITE;
+        if (cur) M5.Lcd.fillRoundRect(6, y, 308, rowH - 2, 3, bg);
+        else     M5.Lcd.drawRoundRect(6, y, 308, rowH - 2, 3, 0x4208);
+        bool lock = (WiFi.encryptionType(idx) != WIFI_AUTH_OPEN);
+        M5.Lcd.setTextColor(fg, bg);
+        char buf[52];
+        snprintf(buf, sizeof(buf), "%2d %s%s", idx + 1, lock ? "* " : "  ", WiFi.SSID(idx).c_str());
+        uiDrawL(buf, 12, y + 5);
+        char r[10];
+        snprintf(r, sizeof(r), "%ddBm", WiFi.RSSI(idx));
+        M5.Lcd.setTextColor(cur ? TFT_BLACK : 0x7BEF, bg);
+        M5.Lcd.setTextDatum(TR_DATUM);
+        M5.Lcd.drawString(r, 305, y + 5);
+      }
+
+      // button bar
+      M5.Lcd.fillRoundRect(upX,  byTop, bW, bH, 5, 0x2945);
+      M5.Lcd.fillRoundRect(dnX,  byTop, bW, bH, 5, 0x2945);
+      M5.Lcd.fillRoundRect(selX, byTop, bW, bH, 5, 0x05A0);
+      M5.Lcd.fillRoundRect(caX,  byTop, bW, bH, 5, TFT_RED);
+      M5.Lcd.setTextColor(TFT_WHITE, 0x2945);
+      uiDrawC("UP",   upX, byTop, bW, bH);
+      uiDrawC("DOWN", dnX, byTop, bW, bH);
+      M5.Lcd.setTextColor(TFT_WHITE, 0x05A0);
+      uiDrawC("SELECT", selX, byTop, bW, bH);
+      M5.Lcd.setTextColor(TFT_WHITE, TFT_RED);
+      uiDrawC("Cancel", caX, byTop, bW, bH);
+      dirty = false;
+    }
+
+    TouchPoint_t p;
+    if (updGetTap(p)) {
+      if (touchInRect(p, caX,  byTop, bW, bH)) ESP.restart();
+      if (touchInRect(p, upX,  byTop, bW, bH)) { if (sel > 0)     { sel--; dirty = true; } continue; }
+      if (touchInRect(p, dnX,  byTop, bW, bH)) { if (sel < n - 1) { sel++; dirty = true; } continue; }
+      if (touchInRect(p, selX, byTop, bW, bH)) {
+        outSsid = WiFi.SSID(sel);
+        WiFi.scanDelete();
+        return sel;
+      }
+    }
+    M5.update();
+    updMaybeScreenshot();
+    delay(10);
+  }
+}
+
+// ---- on-screen QWERTY keyboard (self-contained, felmue-style) --------------
+static const char *KB_R0     = "1234567890";
+static const char *KB_R1_LOW = "qwertyuiop";
+static const char *KB_R2_LOW = "asdfghjkl";
+static const char *KB_R3_LOW = "zxcvbnm";
+static const char *KB_R1_SYM = "!@#$%^&*()";
+static const char *KB_R2_SYM = "-_=+[]{};:";
+static const char *KB_R3_SYM = "/?,.~'\"\\|";  // 9 chars
+
+static const int KB_KH  = 30;
+static const int KB_Y0  = 30;   // digits
+static const int KB_Y1  = 62;
+static const int KB_Y2  = 94;
+static const int KB_Y3  = 126;
+static const int KB_FY  = 160;  // function row
+static const int KB_FH  = 36;
+
+enum { KBA_NONE = 0, KBA_CHAR, KBA_SHIFT, KBA_BACK, KBA_SYM, KBA_OK, KBA_SPACE };
+
+static void kbRowStrings(int layer, const char **r1, const char **r2, const char **r3) {
+  if (layer == 2) { *r1 = KB_R1_SYM; *r2 = KB_R2_SYM; *r3 = KB_R3_SYM; }
+  else            { *r1 = KB_R1_LOW; *r2 = KB_R2_LOW; *r3 = KB_R3_LOW; }
+}
+static char kbApplyCase(char c, int layer) {
+  if (layer == 1 && c >= 'a' && c <= 'z') return c - 'a' + 'A';
+  return c;
+}
+static void kbDrawCell(int x, int y, int w, int h, const char *label, uint16_t bg) {
+  M5.Lcd.fillRoundRect(x, y, w - 2, h - 2, 3, bg);
+  M5.Lcd.setTextColor(TFT_WHITE, bg);
+  uiFontSmall();
+  uiDrawC(label, x, y, w - 2, h - 2);
+}
+static void kbDrawEditBar(const char *ssid, const String &pass) {
+  M5.Lcd.fillRect(0, 0, SCREEN_WIDTH, 28, 0x18C3);
+  uiFontSmall();
+  M5.Lcd.setTextColor(TFT_YELLOW, 0x18C3);
+  String shown = pass.length() ? pass : String("(password)");
+  if (shown.length() > 30) shown = shown.substring(shown.length() - 30);
+  uiDrawL(shown.c_str(), 6, 6);
+}
+static void kbDrawKeyboard(int layer) {
+  M5.Lcd.fillRect(0, 28, SCREEN_WIDTH, SCREEN_HEIGHT - 28, TFT_BLACK);
+  const char *r1, *r2, *r3;
+  kbRowStrings(layer, &r1, &r2, &r3);
+  char lbl[2] = {0, 0};
+  // digits row
+  for (int i = 0; i < 10; i++) { lbl[0] = KB_R0[i]; kbDrawCell(i * 32, KB_Y0, 32, KB_KH, lbl, 0x2104); }
+  // row 1 (10)
+  for (int i = 0; i < 10; i++) { lbl[0] = kbApplyCase(r1[i], layer); kbDrawCell(i * 32, KB_Y1, 32, KB_KH, lbl, 0x2104); }
+  // row 2 (9, centered)
+  for (int i = 0; r2[i]; i++) { lbl[0] = kbApplyCase(r2[i], layer); kbDrawCell(16 + i * 32, KB_Y2, 32, KB_KH, lbl, 0x2104); }
+  // row 3: Shift + 7 letters + Back
+  kbDrawCell(0, KB_Y3, 48, KB_KH, layer == 1 ? "SH^" : "sh", 0x4208);
+  for (int i = 0; r3[i] && i < 9; i++) { lbl[0] = kbApplyCase(r3[i], layer); kbDrawCell(48 + i * 32, KB_Y3, 32, KB_KH, lbl, 0x2104); }
+  kbDrawCell(272, KB_Y3, 48, KB_KH, "<-", 0x4208);
+  // function row: [?123/ABC] [space] [OK] [Cancel]
+  kbDrawCell(0,   KB_FY, 64,  KB_FH, layer == 2 ? "ABC" : "?123", 0x4208);
+  kbDrawCell(64,  KB_FY, 128, KB_FH, "space", 0x2104);
+  kbDrawCell(192, KB_FY, 64,  KB_FH, "OK", 0x05A0);
+  kbDrawCell(256, KB_FY, 64,  KB_FH, "Cancel", TFT_RED);
+}
+// Hit test; sets outChar for KBA_CHAR.
+static int kbHit(const TouchPoint_t &p, int layer, char &outChar) {
+  const char *r1, *r2, *r3;
+  kbRowStrings(layer, &r1, &r2, &r3);
+  // digits
+  if (p.y >= KB_Y0 && p.y < KB_Y0 + KB_KH) { int c = p.x / 32; if (c >= 0 && c < 10) { outChar = KB_R0[c]; return KBA_CHAR; } }
+  // row1
+  if (p.y >= KB_Y1 && p.y < KB_Y1 + KB_KH) { int c = p.x / 32; if (c >= 0 && c < 10) { outChar = kbApplyCase(r1[c], layer); return KBA_CHAR; } }
+  // row2 (offset 16)
+  if (p.y >= KB_Y2 && p.y < KB_Y2 + KB_KH) { int c = (p.x - 16) / 32; if (c >= 0 && r2[c]) { outChar = kbApplyCase(r2[c], layer); return KBA_CHAR; } }
+  // row3
+  if (p.y >= KB_Y3 && p.y < KB_Y3 + KB_KH) {
+    if (p.x < 48) return KBA_SHIFT;
+    if (p.x >= 272) return KBA_BACK;
+    int c = (p.x - 48) / 32; if (c >= 0 && c < 9 && r3[c]) { outChar = kbApplyCase(r3[c], layer); return KBA_CHAR; }
+  }
+  // function row
+  if (p.y >= KB_FY && p.y < KB_FY + KB_FH) {
+    if (p.x < 64)   return KBA_SYM;
+    if (p.x < 192)  { outChar = ' '; return KBA_SPACE; }
+    if (p.x < 256)  return KBA_OK;
+    return KBA_NONE;  // Cancel handled by caller (reboots)
+  }
+  return KBA_NONE;
+}
+// Returns true if OK pressed (pass filled). Cancel reboots.
+static bool updKeyboardGetPassword(const char *ssid, String &outPass) {
+  outPass = "";
+  int layer = 0;
+  M5.Lcd.fillScreen(TFT_BLACK);
+  kbDrawEditBar(ssid, outPass);
+  kbDrawKeyboard(layer);
+  while (true) {
+    TouchPoint_t p;
+    if (updGetTap(p)) {
+      // Cancel key (function row, x>=256) -> reboot
+      if (p.y >= KB_FY && p.y < KB_FY + KB_FH && p.x >= 256) ESP.restart();
+      char ch = 0;
+      int a = kbHit(p, layer, ch);
+      switch (a) {
+        case KBA_CHAR:  outPass += ch; kbDrawEditBar(ssid, outPass); break;
+        case KBA_SPACE: outPass += ' '; kbDrawEditBar(ssid, outPass); break;
+        case KBA_BACK:  if (outPass.length()) { outPass.remove(outPass.length() - 1); kbDrawEditBar(ssid, outPass); } break;
+        case KBA_SHIFT: layer = (layer == 2) ? 0 : (layer ^ 1); kbDrawKeyboard(layer); break;
+        case KBA_SYM:   layer = (layer == 2) ? 0 : 2;           kbDrawKeyboard(layer); break;
+        case KBA_OK:    return true;
+        default: break;
+      }
+    }
+    M5.update();
+    updMaybeScreenshot();
+    delay(8);
+  }
+}
+
+// ---- Wi-Fi connect ---------------------------------------------------------
+static bool updWifiConnect(const char *ssid, const char *pass, uint32_t timeoutMs) {
+  M5.Lcd.fillScreen(TFT_BLACK);
+  uiFontMedium();
+  M5.Lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+  M5.Lcd.setTextDatum(MC_DATUM);
+  M5.Lcd.drawString("Connecting...", SCREEN_WIDTH / 2, 70);
+  uiFontSmall();
+  M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Lcd.drawString(ssid, SCREEN_WIDTH / 2, 104);
+  updDrawCancel();
+
+  WiFi.begin(ssid, pass);
+  uint32_t start = millis();
+  int spin = 0;
+  const char spc[] = {'|', '/', '-', '\\'};
+  while (WiFi.status() != WL_CONNECTED) {
+    if (millis() - start > timeoutMs) return false;
+    TouchPoint_t p;
+    if (updGetTap(p) && updCancelHit(p)) ESP.restart();
+    char s[2] = {spc[spin++ & 3], 0};
+    M5.Lcd.setTextColor(TFT_GREENYELLOW, TFT_BLACK);
+    M5.Lcd.drawString(s, SCREEN_WIDTH / 2, 140);
+    M5.update();
+    updMaybeScreenshot();
+    delay(120);
+  }
+  M5.Lcd.fillScreen(TFT_BLACK);
+  uiFontMedium();
+  M5.Lcd.setTextColor(TFT_GREEN, TFT_BLACK);
+  M5.Lcd.setTextDatum(MC_DATUM);
+  M5.Lcd.drawString("Connected", SCREEN_WIDTH / 2, 90);
+  uiFontSmall();
+  M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Lcd.drawString(WiFi.localIP().toString().c_str(), SCREEN_WIDTH / 2, 124);
+  delay(900);
+  return true;
+}
+
+// ---- download one URL to a temp file on SD, with progress -----------------
+// destTmp is the SD path written to (verified, then the caller mv's it).
+// A Cancel tap during download reboots. Returns true on a verified download.
+static bool updDownloadFile(const char *url, const char *label, const char *destTmp) {
+  HTTPClient http;
+  if (!http.begin(url)) return false;
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) { http.end(); return false; }
+  int len = http.getSize();             // -1 if unknown/chunked
+  WiFiClient *st = http.getStreamPtr();
+
+  SD.remove(destTmp);
+  File f = SD.open(destTmp, FILE_WRITE);
+  if (!f) { http.end(); return false; }
+
+  M5.Lcd.fillScreen(TFT_BLACK);
+  uiFontSmall();
+  M5.Lcd.setTextColor(TFT_CYAN, TFT_BLACK);
+  uiDrawL(label, 10, 12);
+  const int barX = 12, barY = 110, barW = SCREEN_WIDTH - 24, barH = 16;
+  M5.Lcd.drawRoundRect(barX, barY, barW, barH, 3, 0x4208);
+  updDrawCancel();
+
+  uint8_t buf[1460];
+  size_t written = 0;
+  uint32_t lastDraw = 0;
+  bool ok = true;
+  while (true) {
+    // cancel?
+    TouchPoint_t p;
+    if (updGetTap(p) && updCancelHit(p)) { f.close(); http.end(); ESP.restart(); }
+
+    size_t avail = st->available();
+    if (avail) {
+      size_t toRead = avail < sizeof(buf) ? avail : sizeof(buf);
+      int r = st->readBytes(buf, toRead);
+      if (r <= 0) { ok = false; break; }
+      if ((int)f.write(buf, r) != r) { ok = false; break; }   // SD write failure
+      written += r;
+      if (len > 0 && written >= (size_t)len) break;
+    } else {
+      if (!st->connected()) break;     // connection closed (len<0 case ends here)
+      delay(1);
+    }
+
+    uint32_t now = millis();
+    if (now - lastDraw > 100) {
+      lastDraw = now;
+      if (len > 0) {
+        int fill = (int)((uint64_t)(barW - 4) * written / (size_t)len);
+        M5.Lcd.fillRoundRect(barX + 2, barY + 2, fill, barH - 4, 1, TFT_CYAN);
+        char pct[40];
+        snprintf(pct, sizeof(pct), "%u / %u bytes", (unsigned)written, (unsigned)len);
+        M5.Lcd.fillRect(10, barY + 24, SCREEN_WIDTH - 20, 18, TFT_BLACK);
+        M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+        uiDrawL(pct, 10, barY + 24);
+      } else {
+        char b[28];
+        snprintf(b, sizeof(b), "%u bytes", (unsigned)written);
+        M5.Lcd.fillRect(10, barY + 24, SCREEN_WIDTH - 20, 18, TFT_BLACK);
+        M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+        uiDrawL(b, 10, barY + 24);
+      }
+      M5.update();
+    }
+  }
+  f.flush();
+  f.close();
+  http.end();
+
+  // integrity: if Content-Length was known, bytes written must match exactly.
+  if (ok && len >= 0 && written != (size_t)len) ok = false;
+  if (ok && written == 0) ok = false;
+  if (!ok) SD.remove(destTmp);
+  return ok;
+}
+
+// Create any missing parent directories for an SD path like "/smf/a/b.mid".
+static void updEnsureParentDirs(const String &sdPath) {
+  int slash = sdPath.indexOf('/', 1);
+  while (slash > 0) {
+    String dir = sdPath.substring(0, slash);
+    if (dir.length() && !SD.exists(dir)) SD.mkdir(dir);
+    slash = sdPath.indexOf('/', slash + 1);
+  }
+}
+
+// Apply one U: entry. relPath is relative to UPD_BASE_URL and SD root.
+static bool updApplyOneUpdate(const String &relPath) {
+  String url  = String(UPD_BASE_URL) + relPath;
+  String dest = "/" + relPath;
+  if (!updDownloadFile(url.c_str(), dest.c_str(), UPD_PART_FILE)) return false;
+  updEnsureParentDirs(dest);
+  if (SD.exists(dest)) SD.remove(dest);
+  return SD.rename(UPD_PART_FILE, dest);   // atomic promote
+}
+
+// Apply one E: entry.
+static void updApplyOneDelete(const String &relPath) {
+  String dest = "/" + relPath;
+  if (dest == UPD_BOOT_BIN) return;        // never delete the boot firmware
+  if (!SD.exists(dest)) return;
+  File f = SD.open(dest);
+  bool isDir = f && f.isDirectory();
+  if (f) f.close();
+  if (isDir) SD.rmdir(dest);
+  else       SD.remove(dest);
+}
+
+// Read the first "#<int>" version marker from a manifest file's first
+// non-blank line. Returns the integer, or -1 if the file/line is missing.
+static int updReadFirstVersion(const char *path) {
+  File f = SD.open(path, FILE_READ);
+  if (!f) return -1;
+  int ver = -1;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
+    if (line[0] == '#') {
+      String num = line.substring(1); num.trim();
+      if (num.length() && (num[0] == '-' || isdigit((int)num[0]))) ver = num.toInt();
+    }
+    break;  // only the first non-blank line is the header
+  }
+  f.close();
+  return ver;
+}
+
+// Apply the changelog in UPD_NEW_FILE in file order: every U:/E: entry whose
+// enclosing "#<n>" block is GREATER than storedVer. The first "#<latest>" header
+// line sets curBlock = latest, harmless (no entries precede the next marker).
+static void updApplyChangelog(int storedVer) {
+  File f = SD.open(UPD_NEW_FILE, FILE_READ);
+  if (!f) return;
+  int curBlock = -1;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();                            // drops trailing \r and spaces
+    if (line.length() == 0) continue;
+    if (line[0] == '#') {
+      String num = line.substring(1); num.trim();
+      if (num.length() && (num[0] == '-' || isdigit((int)num[0]))) curBlock = num.toInt();
+      continue;
+    }
+    if (curBlock <= storedVer) continue;    // already applied in a past run
+    if (line.startsWith("E:")) {
+      String path = line.substring(2); path.trim();
+      if (path.length()) updApplyOneDelete(path);
+    } else if (line.startsWith("U:")) {
+      String path = line.substring(2); path.trim();
+      if (path.length() && !updApplyOneUpdate(path)) gUpdFails++;
+    }
+  }
+  f.close();
+}
+
+// Terminal screen: show a message plus [Power Off] and [Reboot] buttons.
+// Never returns (Power Off shuts down, Reboot restarts into normal MIDI mode).
+static void updTerminalScreen(const char *msg, uint16_t color) {
+  M5.Lcd.fillScreen(TFT_BLACK);
+  uiFontMedium();
+  M5.Lcd.setTextColor(color, TFT_BLACK);
+  M5.Lcd.setTextDatum(MC_DATUM);
+  M5.Lcd.drawString(msg, SCREEN_WIDTH / 2, 80);
+
+  const int poX = 20, poY = 188, poW = 134, poH = 40;
+  const int rbX = 166, rbY = 188, rbW = 134, rbH = 40;
+  M5.Lcd.fillRoundRect(poX, poY, poW, poH, 5, TFT_RED);
+  M5.Lcd.fillRoundRect(rbX, rbY, rbW, rbH, 5, 0x2945);
+  M5.Lcd.setTextColor(TFT_WHITE, TFT_RED);
+  uiDrawC("Power Off", poX, poY, poW, poH);
+  M5.Lcd.setTextColor(TFT_WHITE, 0x2945);
+  uiDrawC("Reboot", rbX, rbY, rbW, rbH);
+
+  while (true) {
+    TouchPoint_t p;
+    if (updGetTap(p)) {
+      if (touchInRect(p, poX, poY, poW, poH)) M5.Axp.PowerOff();
+      if (touchInRect(p, rbX, rbY, rbW, rbH)) ESP.restart();
+    }
+    M5.update();
+    updMaybeScreenshot();
+    delay(10);
+  }
+}
+
+// Flash the (freshly updated) firmware and reboot into it.
+static void updForceBootAndRestart() {
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  if (SD.exists(UPD_BOOT_BIN)) {
+    updateFromFS(SD, UPD_BOOT_BIN, TFCARD_CS_PIN);   // flashes + ESP.restart()
+  }
+  ESP.restart();
+}
+
+// Orchestrator. Never returns (always reboots).
+static void runUpdateMode() {
+  gUpdFails = 0;
+  M5.Lcd.setBrightness(200);
+  M5.Lcd.fillScreen(TFT_BLACK);
+
+  if (SD.cardType() == CARD_NONE) {
+    updMsg("No SD card.\nReboot to MIDI.", TFT_RED);
+    delay(2500);
+    ESP.restart();
+  }
+
+  String ssid, pass;
+  if (updWifiScanAndSelect(ssid) < 0) {
+    updMsg("No Wi-Fi found.", TFT_RED);
+    delay(2000);
+    ESP.restart();
+  }
+  // password entry + connect; wrong password -> re-enter
+  while (true) {
+    if (!updKeyboardGetPassword(ssid.c_str(), pass)) ESP.restart();  // Cancel
+    if (updWifiConnect(ssid.c_str(), pass.c_str(), 15000)) break;
+    updMsg("Connect failed.\nRe-enter password.", TFT_RED);
+    delay(1500);
+  }
+
+  // Remember our current version (first line of the previously applied list).
+  int storedVer = updReadFirstVersion(UPD_LIST_FILE);   // -1 if never updated
+
+  // Download the new manifest to its own temp (NOT /download.part, which is
+  // reused for per-file downloads during apply).
+  updMsg("Fetching update list...", TFT_CYAN);
+  if (!updDownloadFile(UPD_MANIFEST_URL, "downloadlist.txt", UPD_NEW_FILE)) {
+    updTerminalScreen("No Updater", TFT_ORANGE);        // manifest missing (404)
+  }
+
+  int newVer = updReadFirstVersion(UPD_NEW_FILE);
+  if (newVer < 0) {
+    SD.remove(UPD_NEW_FILE);
+    updTerminalScreen("Bad update list", TFT_RED);      // no #version header
+  }
+  if (newVer == storedVer) {
+    SD.remove(UPD_NEW_FILE);
+    updTerminalScreen("No need to update", TFT_GREEN);   // already current
+  }
+
+  // Apply only the changelog blocks newer than our stored version, in order.
+  updApplyChangelog(storedVer);
+
+  if (gUpdFails > 0) {
+    // Keep the old /downloadlist.txt so the (unchanged) version triggers a full
+    // retry next time -- do NOT record the new version on partial failure.
+    char m[48];
+    snprintf(m, sizeof(m), "%d file(s) failed.\nFlashing anyway...", gUpdFails);
+    updMsg(m, TFT_ORANGE);
+    delay(2500);
+  } else {
+    // Success: commit the new version by saving the manifest as the applied list.
+    SD.remove(UPD_LIST_FILE);
+    SD.rename(UPD_NEW_FILE, UPD_LIST_FILE);
+    updMsg("Updates applied.\nFlashing firmware...", TFT_GREEN);
+    delay(1200);
+  }
+  updForceBootAndRestart();
+  ESP.restart();
 }
 
 void setup() {
   M5.begin(true, true, true, true);
+  Serial.begin(115200);            // early, so the entry gate can log to USB serial
+
+  // Boot order: M5StackUpdater FIRST (hold BtnA here to roll back to the
+  // launcher menu), THEN the splash. Holding the center button (B) during the
+  // splash enters the fully-isolated Wi-Fi update mode (before any MIDI /
+  // Bluetooth init; never returns).
+  // for SD-Updater
+  checkSDUpdater( SD, MENU_BIN, 2000, TFCARD_CS_PIN );
+
+  if (showSplashScreen()) {
+    runUpdateMode();
+  }
 
   // LCD に直接描画する (PSRAM スプライトの fillRect memcpy バグを回避)。
   // スクリーンショットも公式 M5Stack の TFT_Screen_Capture と同様、
   // LCD GRAM から行ごと readRectRGB で吸い出す。
-
-  // for SD-Updater
-  checkSDUpdater( SD, MENU_BIN, 2000, TFCARD_CS_PIN );
-
-  Serial.begin(115200);
 
   // M5.begin(..., true) initializes Wire on Port A (G32/G33) for I2C.
   // We need those pins for UART instead, so release the I2C bus first.
@@ -1481,8 +2119,8 @@ void setup() {
     }
   }
 
+  // (Splash already shown earlier in setup(), after the updater entry gate.)
   M5.Lcd.fillScreen(BLACK);
-  showSplashScreen();
   drawInterface();
 
   Serial.println("MIDI Transposer Ready!");
