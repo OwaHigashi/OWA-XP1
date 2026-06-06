@@ -1,9 +1,9 @@
-# M5Core-MIDIXposeFilBTUM
+# OWA-XP1
 
 M5Core2 + M5 Unit MIDI (SAM2695) を使った **MIDI 演奏機 / トランスポーザー / メッセージ管理ツール / SMF プレーヤー** です。
 起動直後は `PLAY` モード (Unit MIDI 内蔵 GM 音源を直接鳴らす) に入り、`C` 長押しで転調機能・MIDI 加工機能、`C` 短押しで SMF プレーヤーへ移れます。
 
-現在のスケッチ本体は [M5Core2-MIDIXposeFilBT.ino](./M5Core2-MIDIXposeFilBT.ino) です。
+現在のスケッチ本体は [OWA-XP1.ino](./OWA-XP1.ino) です。
 
 ## ハードウェア
 
@@ -319,7 +319,7 @@ SMF プレーヤー画面では、再生 / 停止と選曲 (即選曲画面) は
 
 ## ファイル構成
 
-- `M5Core2-MIDIXposeFilBT.ino`: メインスケッチ
+- `OWA-XP1.ino`: メインスケッチ
 - `src/`: Bluetooth HID 関連コード
 - `src/MD_MIDIFile/`: SMF パーサライブラリ (移植元: `../M5Core2-SMF-Player`)
 - `tests/`: PC ホストで動かす MAPPER テストハーネスとシリアル診断スクリプト
@@ -333,12 +333,12 @@ SMF プレーヤー画面では、再生 / 停止と選曲 (即選曲画面) は
 
 ```bash
 # 例: Git Bash 上での 1 セット
-mkdir -p /tmp/sketch_build/M5Core2-MIDIXposeFilBT
-cp M5Core2-MIDIXposeFilBT.ino /tmp/sketch_build/M5Core2-MIDIXposeFilBT/
-cp -r src /tmp/sketch_build/M5Core2-MIDIXposeFilBT/
+mkdir -p /tmp/sketch_build/OWA-XP1
+cp OWA-XP1.ino /tmp/sketch_build/OWA-XP1/
+cp -r src /tmp/sketch_build/OWA-XP1/
 
-arduino-cli compile --fqbn m5stack:esp32:m5stack_core2 /tmp/sketch_build/M5Core2-MIDIXposeFilBT
-arduino-cli upload  -p COM3 --fqbn m5stack:esp32:m5stack_core2 /tmp/sketch_build/M5Core2-MIDIXposeFilBT
+arduino-cli compile --fqbn m5stack:esp32:m5stack_core2 /tmp/sketch_build/OWA-XP1
+arduino-cli upload  -p COM3 --fqbn m5stack:esp32:m5stack_core2 /tmp/sketch_build/OWA-XP1
 ```
 
 `-p` オプションには本機が見えている COM ポート (USB) を指定します

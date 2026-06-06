@@ -1353,16 +1353,16 @@ static bool showSplashScreen() {
   uiFontSmall();
   M5.Lcd.setTextDatum(MC_DATUM);
   M5.Lcd.setTextColor(0x8C71, TFT_BLACK);
-  M5.Lcd.drawString("MIDI Xpose + Filter + Manager + Unit MIDI", cx, cy + 18);
+  M5.Lcd.drawString("OWA-XP1:MIDI XP+Filter+Manager", cx, cy + 18);
 
   M5.Lcd.setTextFont(1);
   M5.Lcd.setTextSize(1);
   M5.Lcd.setTextColor(0x6B4D, TFT_BLACK);
-  M5.Lcd.drawString("for M5Stack Core2 (Unit MIDI on Port A)", cx, cy + 66);
+  M5.Lcd.drawString("for M5Stack Core2 (w/ Unit MIDI)", cx, cy + 66);
 
   // Subtle hint: hold the center button (B) during the splash to update.
   M5.Lcd.setTextColor(0x4A49, TFT_BLACK);
-  M5.Lcd.drawString("hold [B] for Wi-Fi firmware update", cx, cy + 86);
+  M5.Lcd.drawString("hold [B] for firmware update", cx, cy + 86);
 
   const int pbW = 200;
   const int pbH = 6;
@@ -1430,7 +1430,7 @@ static bool showSplashScreen() {
 //
 //      #5                <- header: latest version is 5 (quick "am I current?")
 //      #1
-//      U:00MIDIXposeFilBTUM-Black.bin   (download <BASE>/path -> SD /path)
+//      U:OWA-XP1.bin   (download <BASE>/path -> SD /path)
 //      U:smf/hoge.mid
 //      #2
 //      E:gege.bin                       (delete SD /gege.bin)
@@ -1448,9 +1448,9 @@ static bool showSplashScreen() {
 //  No compression anywhere.
 // ============================================================================
 
-static constexpr char UPD_MANIFEST_URL[] = "http://west.yokohama/OWA-1/XP1/downloadlist.txt";
-static constexpr char UPD_BASE_URL[]     = "http://west.yokohama/OWA-1/XP1/SDimg/";
-static constexpr char UPD_BOOT_BIN[]     = "/00MIDIXposeFilBTUM-Black.bin";
+static constexpr char UPD_MANIFEST_URL[] = "http://west.yokohama/OWA/XP1/firmupdate.txt";
+static constexpr char UPD_BASE_URL[]     = "http://west.yokohama/OWA/XP1/SDimg/";
+static constexpr char UPD_BOOT_BIN[]     = "/OWA-XP1.bin";
 static constexpr char UPD_PART_FILE[]    = "/download.part";    // per-file download temp (mv to dest)
 static constexpr char UPD_NEW_FILE[]     = "/downloadlist.new"; // freshly downloaded manifest (transient)
 static constexpr char UPD_LIST_FILE[]    = "/downloadlist.txt"; // last applied manifest (first line = current version)
