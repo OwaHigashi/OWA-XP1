@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>M5Core2 MIDI Transposer + MIDI Manager 取扱説明書</title>
+<title>OWA-XP1 取扱説明書 — MIDI Transposer + MIDI Manager</title>
 <style>
   :root{
     --bg:#0e1117;
@@ -194,10 +194,10 @@
 
 <header class="cover">
   <span class="badge">USER MANUAL</span>
-  <h1>M5Core2 MIDI Transposer + MIDI Manager<br>OWAMIDICON</h1>
+  <h1>OWA-XP1<br>MIDI Transposer + MIDI Manager</h1>
   <h2>転調機能と MIDI メッセージ管理を一台で行うパフォーマンスツール<br>Programmed by Owa Higashi (おわ/尾和)</h2>
   <div class="meta">
-    Version: 2026-05 / 対応ハード: <b>M5Stack Core2</b> + <b>M5 Unit MIDI (SAM2695)</b> / 接続: <b>USB MIDI / Bluetooth HID フットペダル</b> / 機能: <b>SMF プレーヤー搭載</b>
+    Version: 2026-06 / 対応ハード: <b>M5Stack Core2</b> + <b>M5 Unit MIDI (SAM2695)</b> / 接続: <b>USB MIDI / Bluetooth HID フットペダル</b> / 機能: <b>SMF プレーヤー搭載 / Wi-Fi ファーム更新</b>
   </div>
 </header>
 
@@ -225,6 +225,7 @@
     <li><a href="#flow">MIDI 処理の流れ</a></li>
     <li><a href="#serial">PC 連携 (USB シリアル)</a></li>
     <li><a href="#tips">困ったときに</a></li>
+    <li><a href="#firmware-update">ファームウェア更新 (Wi-Fi)</a></li>
   </ol>
 </nav>
 
@@ -1071,10 +1072,122 @@ OK SCREENSHOT_DONE
   </div>
 </section>
 
+<!-- ===== Firmware Update (Wi-Fi) ===== -->
+<section id="firmware-update">
+  <h1 class="section-title">19. ファームウェア更新 (Wi-Fi) <span class="tag short">新規</span></h1>
+  <p>
+    本機は <b>Wi-Fi 経由でファームウェアと付属データ (SMF・画像など) を更新</b> できます。
+    更新サーバ上の「変更リスト (マニフェスト)」を読み、<b>自分の版より新しい分だけ</b> を差分ダウンロードして適用し、
+    新しいファームウェアがあれば本体に書き込んでから再起動します。
+  </p>
+
+  <div class="callout tip">
+    <b class="label">入りかた</b>
+    電源投入直後の <b>起動スプラッシュ</b> (約 4 秒) の間に <span class="btn-icon B">B</span> (中央ボタン) を押し続けると更新モードに入ります。
+    スプラッシュ下部にも <code>hold [B] for firmware update</code> と表示されます。
+    更新モードは MIDI / Bluetooth を一切起動しない独立モードで、終わると自動的に再起動します。
+  </div>
+
+  <div class="callout">
+    <b class="label">準備するもの</b>
+    <ul style="margin:.4em 0 0 1.2em">
+      <li><b>SD カード</b> (更新データの保存先。未挿入ならそのまま通常モードへ戻ります)</li>
+      <li><b>2.4GHz の Wi-Fi</b> アクセスポイントと、そのパスワード</li>
+    </ul>
+  </div>
+
+  <h3>1. Wi-Fi を選んでパスワードを入力</h3>
+  <div class="pair">
+    <figure class="shot">
+      <div class="frame">
+        <img src="screenshots/upd-01-wifi.png" alt="Wi-Fi ネットワーク選択画面">
+      </div>
+      <figcaption>図 19-1: 周囲の Wi-Fi 一覧 (電波強度つき)</figcaption>
+    </figure>
+    <figure class="shot">
+      <div class="frame">
+        <img src="screenshots/upd-02-keyboard.png" alt="パスワード入力キーボード">
+      </div>
+      <figcaption>図 19-2: オンスクリーン・キーボード</figcaption>
+    </figure>
+  </div>
+  <p>
+    更新モードに入ると周囲の Wi-Fi をスキャンして一覧表示します (図 19-1)。
+    <code>UP</code> / <code>DOWN</code> でスクロールし、接続先を選んで <code>SELECT</code> を押します
+    (<code>Cancel</code> で更新を中止して再起動)。
+  </p>
+  <p>続いてパスワードを入力します (図 19-2)。主なキー:</p>
+  <table>
+    <tr><th>キー</th><th>働き</th></tr>
+    <tr><td><code>sh</code></td><td>Shift (大文字 / 記号レイヤの切替)</td></tr>
+    <tr><td><code>?123</code></td><td>数字・記号レイヤ ⇔ 英字レイヤの切替</td></tr>
+    <tr><td><code>space</code></td><td>スペース入力</td></tr>
+    <tr><td><code>&lt;-</code></td><td>1 文字削除 (バックスペース)</td></tr>
+    <tr><td><code>OK</code></td><td>確定して接続を開始</td></tr>
+    <tr><td><code>Cancel</code></td><td>更新を中止して再起動</td></tr>
+  </table>
+  <div class="callout tip">
+    <b class="label">パスワードを間違えたら</b>
+    接続に失敗すると <code>Connect failed. Re-enter password.</code> と表示され、もう一度入力画面に戻ります。
+  </div>
+
+  <h3>2. 更新リストの取得とダウンロード</h3>
+  <p>
+    接続できると更新サーバから最新の更新リスト (<code>firmupdate.txt</code>) を取得します。
+    <b>SD に記録された自分の版と同じなら</b> <code>No need to update</code> (最新です) を表示して終了します。
+    新しい版があるときは <b>差分のファイルだけ</b> を順番にダウンロードします (図 19-3)。
+  </p>
+  <figure class="shot">
+    <div class="frame">
+      <img src="screenshots/upd-04-downloading.png" alt="ダウンロード進捗画面">
+    </div>
+    <figcaption>図 19-3: ダウンロード中 (ファイル名・進捗バー・バイト数)</figcaption>
+  </figure>
+  <p>
+    画面上部にダウンロード中のファイル名、中央に進捗バーと <code>現在 / 全体 bytes</code> が出ます。
+    <code>Cancel</code> でいつでも中止できます (中止した分は次回やり直されます)。
+  </p>
+
+  <h3>3. 適用と再起動</h3>
+  <p>
+    すべてのダウンロードが終わると更新が確定します。
+    <b>新しいファームウェア (<code>OWA-XP1.bin</code>) が含まれていれば本体に書き込んで</b> から再起動し (<code>Flashing firmware...</code>)、
+    データだけの更新なら書き込まずに再起動します (<code>Rebooting...</code>)。再起動後は新しい内容で起動します。
+  </p>
+
+  <div class="callout">
+    <b class="label">安全のしくみ</b>
+    <ul style="margin:.4em 0 0 1.2em">
+      <li><b>差分更新</b>: 自分の版より新しいぶんだけを古い→新しい順に適用。数版遅れていても途中を飛ばしません。</li>
+      <li><b>中断に強い</b>: 更新リストは一時ファイル (<code>firmupdate.txt.ongoing</code>) として受け取り、<b>全部成功したときだけ</b> 確定版へ切り替えます。途中で切断しても「更新済み」とは記録されず、次回やり直します。</li>
+      <li><b>無い物はスキップ</b>: サーバに無いファイル (404) は無視し、失敗とは数えません。</li>
+      <li><b>フラッシュ保護</b>: 本体への書き込みは <code>OWA-XP1.bin</code> を実際に更新したときだけ行い、データのみの更新では書き込みません (フラッシュの消耗を抑制)。</li>
+    </ul>
+  </div>
+
+  <h3>更新サーバが見つからないとき</h3>
+  <figure class="shot">
+    <div class="frame">
+      <img src="screenshots/upd-03-no-updater.png" alt="No Updater 画面">
+    </div>
+    <figcaption>図 19-4: No Updater (更新リストを取得できない)</figcaption>
+  </figure>
+  <p>
+    更新リストを取得できない (サーバ未配置・URL が 404・ネット不通など) ときは <code>No Updater</code> を表示します。
+    この画面や各終了画面では <code>Power Off</code> (電源オフ) か <code>Reboot</code> (通常 MIDI モードへ再起動) を選べます。
+  </p>
+
+  <div class="callout tip">
+    <b class="label">配信元</b>
+    更新リスト: <code>http://west.yokohama/OWA/XP1/firmupdate.txt</code><br>
+    ダウンロード元 (ルート): <code>http://west.yokohama/OWA/XP1/SDimg/</code>
+  </div>
+</section>
+
 </main>
 
 <footer>
-  M5Core2 MIDI Transposer + MIDI Manager &nbsp;/&nbsp; User Manual &nbsp;/&nbsp; 2026-04
+  OWA-XP1 &nbsp;/&nbsp; MIDI Transposer + MIDI Manager &nbsp;/&nbsp; User Manual &nbsp;/&nbsp; 2026-06
 </footer>
 
 </body>
