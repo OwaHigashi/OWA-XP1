@@ -2,6 +2,7 @@ build/
 *.ppm
 *.log
 *.pdf
+!OWA-XP1_manual.pdf
 chat.txt
 screenshots/retest/
 screenshots/.capsrv/
