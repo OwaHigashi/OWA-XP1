@@ -5650,11 +5650,25 @@ void confirmPowerOff() {
   uiDrawC("Cancel", canX, canY, canW, canH);
 
   gOverlayActive = true;    // SCREENSHOT はこのオーバーレイをそのまま撮る
+  // 注意: Core2 の A/B/C は画面と同じタッチパネル上のボタン。B 長押しでここへ来た
+  // 直後はまだ指が B (タッチ) に触れているため、その押下をそのまま「タップ」として
+  // 拾うとモーダルが即座に閉じてしまう (初回だけ症状が出る)。一度指が離れる
+  // (リリース)のを待ってから、新しいタップだけを確定/取消として扱う。
+  bool sawRelease = false;
   while (true) {
-    TouchPoint_t p;
-    if (updGetTap(p)) {
+    // シリアル注入タップ(スクリプト撮影用)はリリース待ち無しで即適用。
+    if (gInjTapX >= 0) {
+      TouchPoint_t p; p.x = gInjTapX; p.y = gInjTapY; gInjTapX = -1; gInjTapY = -1;
       if (touchInRect(p, offX, offY, offW, offH)) M5.Axp.PowerOff();  // 戻らない
-      break;  // Cancel / その他 → 取消
+      break;
+    }
+    TouchPoint_t tp = M5.Touch.getPressPoint();
+    bool touched = (tp.x != -1 && tp.y != -1);
+    if (!touched) {
+      sawRelease = true;                 // 指が離れた → 以降の新規タップを受け付ける
+    } else if (sawRelease) {
+      if (touchInRect(tp, offX, offY, offW, offH)) M5.Axp.PowerOff();  // 戻らない
+      break;                             // Cancel / その他 → 取消
     }
     M5.update();
     updMaybeScreenshot();   // マニュアル用に SCREENSHOT / UPDTAP を受け付ける
