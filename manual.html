@@ -443,7 +443,11 @@
       <h3>3 つの物理ボタンの役割</h3>
       <table>
         <tr><th>ボタン</th><th>役割</th></tr>
-        <tr><td><span class="btn-icon A">A</span></td><td>All Notes Off の <b>ON / OFF</b> 切替</td></tr>
+        <tr><td><span class="btn-icon A">A</span></td><td>
+          <span class="tag short">短押し</span> All Notes Off を<b>送信</b> (全 16ch に消音を送る)<br>
+          <span class="tag long">長押し</span> All Notes Off <b>モード</b>の <b>ON / OFF</b> 切替<br>
+          <small>全モード共通の動作です (SMF プレーヤーのみ A は曲操作)。</small>
+        </td></tr>
         <tr><td><span class="btn-icon B">B</span></td><td>現在のモードによって役割が変わる<br><span class="tag short">後述</span></td></tr>
         <tr><td><span class="btn-icon C">C</span></td><td>
           <span class="tag short">短押し</span> グループ内のモードを順送り<br>
@@ -477,24 +481,28 @@
   </figure>
 
   <div class="annot">
+    <span><b>左上隅:</b> 小さな <b>MIDI モニタ</b> (受信ランプ)</span>
     <span><b>左上:</b> タイトル (MIDI Transposer / MIDI Manager)</span>
     <span><b>右上:</b> 現在の <b>Transpose 値</b></span>
   </div>
   <div class="annot">
-    <span><b>2 段目:</b> 物理ボタンのヒント表示 (例: <code>A:AllOff B:Action C:N</code>)</span>
-    <span><b>I:○ O:○:</b> MIDI 入出力カウンタ</span>
+    <span><b>2 段目:</b> <code>A:AllOff</code> / <code>BT:…</code> と、物理ボタンのヒント表示</span>
   </div>
 
   <h3>ステータス行の各文字の意味</h3>
   <table>
     <tr><th>表示</th><th>意味</th></tr>
-    <tr><td><code>A:AllOff</code></td><td>A ボタンで All Notes Off の動作を切り替えられる、という意味</td></tr>
+    <tr><td><b>MIDI モニタ</b> (左上隅の小さな四角)</td><td>MIDI を受信すると<b>点滅</b>します。Note On・Note Off の両方で反応するので、信号が届いているか一目で分かります。</td></tr>
+    <tr><td><code>A:AllOff</code></td><td>A ボタンの <b>長押し</b>で All Notes Off モードの ON/OFF を切替 (現在の状態は <code>AllOff:ON/OFF</code> 表示)。A の <b>短押し</b>は All Notes Off を即<b>送信</b></td></tr>
     <tr><td><code>B:Range</code> / <code>B:Zero</code> / <code>B:Next</code> など</td><td>B ボタンの現在の役割 (画面ごとに変化)。転調モードでは DIRECT=レンジ切替 (<code>B:Range</code>) / INSTANT=転調を <code>0</code> にリセット (<code>B:Zero</code>) / SEQUENCE=次のステップへ (<code>B:Next</code>)</td></tr>
     <tr><td><code>C:N</code></td><td>C ボタンに割当中の動作の略称</td></tr>
-    <tr><td><code>I:○</code></td><td>受信した MIDI メッセージ数</td></tr>
-    <tr><td><code>O:○</code></td><td>送信した MIDI メッセージ数</td></tr>
     <tr><td><code>BT:…</code></td><td>Bluetooth HID フットペダル の接続状態</td></tr>
   </table>
+  <div class="callout tip">
+    <b class="label">MIDI 入出力カウンタについて</b>
+    旧来あった <code>I:○ O:○</code> (入出力メッセージ数) の表示は、転調値と重なって見にくいため<b>画面からは省略</b>しました。
+    数値は USB シリアルの <code>STATUS</code> コマンドで確認できます (<code>midi_in</code> / <code>midi_out</code>)。
+  </div>
 </section>
 
 <!-- ===== Operation ===== -->
@@ -957,7 +965,7 @@
     <tr><td><b>FILTER</b></td><td>条件にマッチしたメッセージを破棄。BYPASS なら全部スルー。</td></tr>
     <tr><td><b>MAPPER</b></td><td>最初に一致した 1 ルールだけ適用して書き換え。BYPASS なら全部スルー。</td></tr>
     <tr><td><b>Transpose</b></td><td>主に Note On / Note Off に対して、現在の Transpose 値ぶん音程を上下。</td></tr>
-    <tr><td><b>All Notes Off</b></td><td>16ch 全部に対して送出される (A ボタンで ON/OFF 切替)。</td></tr>
+    <tr><td><b>All Notes Off</b></td><td>16ch 全部に対して送出される (A 短押しで即送信 / A 長押しで自動送出モードの ON/OFF 切替)。</td></tr>
   </table>
 </section>
 
@@ -1113,9 +1121,20 @@ OK SCREENSHOT_DONE
   </div>
   <p>
     更新モードに入ると周囲の Wi-Fi をスキャンして一覧表示します (図 19-1)。
-    <code>UP</code> / <code>DOWN</code> でスクロールし、接続先を選んで <code>SELECT</code> を押します
-    (<code>Cancel</code> で更新を中止して再起動)。
+    画面下のボタンは <code>DOWN</code> / <code>UP</code> / <code>SEL</code> / <code>ReUSE</code> の 4 つです。
+    <code>DOWN</code> / <code>UP</code> でカーソルを動かすほか、<b>一覧の行を直接タッチ</b>してカーソルを合わせることもできます。
+    いずれの場合も、接続先を選んだら <code>SEL</code> を押すとパスワード入力に進みます
+    (行をタッチしただけでは次へは進みません。必ず <code>SEL</code> で確定してください)。
+    更新を<b>中止</b>したいときは本体の<b>リセットボタン</b>を押してください (通常 MIDI モードで再起動します)。
   </p>
+  <div class="callout tip">
+    <b class="label">ReUSE — 前回の Wi-Fi を再利用</b>
+    一度パスワード入力に成功すると、その <b>SSID とパスワードを SD カードの <code>/config.ini</code> に保存</b> します。
+    次回からは Wi-Fi 一覧で <code>ReUSE</code> を押すだけで、キーボード入力を飛ばして同じネットワークへ接続できます。
+    保存がまだ無いときは <code>ReUSE</code> ボタンは<b>灰色</b>で表示され、押すと <code>No saved Wi-Fi</code> と知らせます。
+    保存後は<b>青色</b>になります。別のネットワークに変えたいときは、これまで通り一覧から選んで <code>SEL</code> してください
+    (新しい接続が成功すると保存内容も自動で上書きされます)。
+  </div>
   <p>続いてパスワードを入力します (図 19-2)。主なキー:</p>
   <table>
     <tr><th>キー</th><th>働き</th></tr>
@@ -1124,11 +1143,13 @@ OK SCREENSHOT_DONE
     <tr><td><code>space</code></td><td>スペース入力</td></tr>
     <tr><td><code>&lt;-</code></td><td>1 文字削除 (バックスペース)</td></tr>
     <tr><td><code>OK</code></td><td>確定して接続を開始</td></tr>
-    <tr><td><code>Cancel</code></td><td>更新を中止して再起動</td></tr>
+    <tr><td><code>Cancel</code></td><td><b>Wi-Fi 選択画面に戻る</b> (別のネットワークを選び直せます)</td></tr>
   </table>
   <div class="callout tip">
     <b class="label">パスワードを間違えたら</b>
-    接続に失敗すると <code>Connect failed. Re-enter password.</code> と表示され、もう一度入力画面に戻ります。
+    接続に失敗すると <code>Connect failed. Pick a network.</code> と表示され、<b>Wi-Fi 選択画面に戻ります</b>。
+    ネットワークを選び直して、もう一度パスワードを入力してください
+    (<code>ReUSE</code> の保存内容で接続できなかったときも同様に選択画面へ戻ります)。
   </div>
 
   <h3>2. 更新リストの取得とダウンロード</h3>
@@ -1182,6 +1203,55 @@ OK SCREENSHOT_DONE
     更新リスト: <code>http://west.yokohama/OWA/XP1/firmupdate.txt</code><br>
     ダウンロード元 (ルート): <code>http://west.yokohama/OWA/XP1/SDimg/</code>
   </div>
+
+  <h3>設定ファイル <code>/config.ini</code></h3>
+  <p>
+    本機は設定を SD カード直下の <code>/config.ini</code> に保存します。
+    <b>テキスト形式の「キー=値」</b> で、1 行に 1 項目を書きます。パソコンのテキストエディタでも編集できます。
+    <code>ReUSE</code> 用の Wi-Fi 情報もこのファイルに記録され、今後の設定項目もここに追加されていきます。
+  </p>
+  <pre><code># これはコメント行 (';' でも可)
+SSID=MyHomeWiFi
+PASS=my-secret-password
+SETUP=Player</code></pre>
+  <p>書式のルール:</p>
+  <ul>
+    <li><b>キー=値</b> の形式。<code>=</code> の前後やキー・値の前後の空白は無視されます (値の<b>途中</b>の空白は保持。SSID 内のスペースなどに対応)。</li>
+    <li><b>キー名は大文字小文字を区別しません</b> (<code>SSID</code> と <code>ssid</code> は同じ)。</li>
+    <li>空行と、行頭が <code>#</code> または <code>;</code> の行は<b>コメント</b>として無視されます。</li>
+    <li>本機が値を書き換えるときも、他のキーやコメント行は<b>そのまま残ります</b> (一時ファイル経由で安全に書き込み)。</li>
+  </ul>
+  <p>現在使用しているキー:</p>
+  <table>
+    <tr><th>キー</th><th>意味</th><th>例</th></tr>
+    <tr><td><code>SSID</code></td><td>最後に接続に成功した Wi-Fi の SSID</td><td><code>MyHomeWiFi</code></td></tr>
+    <tr><td><code>PASS</code></td><td>その Wi-Fi のパスワード</td><td><code>my-secret-password</code></td></tr>
+    <tr><td><code>SETUP</code></td><td>電源投入時に最初に開く画面 (下表)。無い／未知の値なら従来どおり起動</td><td><code>Player</code></td></tr>
+  </table>
+  <div class="callout">
+    <b class="label">ご注意</b>
+    パスワードは<b>そのままの文字列 (平文)</b> で保存されます。SD カードの取り扱いにご注意ください。
+    手で編集して保存しておけば、最初から <code>ReUSE</code> で接続することもできます。
+  </div>
+
+  <h3>起動画面の指定 <code>SETUP</code></h3>
+  <p>
+    <code>/config.ini</code> に <code>SETUP=</code> を書いておくと、電源投入時にその画面から始められます
+    (大文字小文字は区別しません)。キーが無い、または未知の値のときは<b>従来どおり</b>の起動になります
+    (内蔵音源モデルは <code>Player</code> 画面)。
+  </p>
+  <table>
+    <tr><th><code>SETUP</code> の値</th><th>開く画面</th><th>別名</th></tr>
+    <tr><td><code>Player</code></td><td>MIDI Player (内蔵音源演奏)</td><td><code>Synth</code></td></tr>
+    <tr><td><code>Transposer</code></td><td>転調 (前回開いていた転調モード／初期は Direct)</td><td>&mdash;</td></tr>
+    <tr><td><code>Direct</code></td><td>Direct 転調</td><td>&mdash;</td></tr>
+    <tr><td><code>Key</code></td><td>Key 転調 (Major/Minor Keys)</td><td><code>Origin</code></td></tr>
+    <tr><td><code>Instant</code></td><td>Instant 転調</td><td><code>Relative</code></td></tr>
+    <tr><td><code>Sequence</code></td><td>Sequence 転調</td><td><code>Seq</code></td></tr>
+    <tr><td><code>Filter</code></td><td>MIDI Filter</td><td><code>MIDI</code></td></tr>
+    <tr><td><code>Mapper</code></td><td>MIDI Mapper</td><td>&mdash;</td></tr>
+    <tr><td><code>SMF</code></td><td>SMF プレーヤー (MIDI ファイル再生)</td><td>&mdash;</td></tr>
+  </table>
 </section>
 
 </main>

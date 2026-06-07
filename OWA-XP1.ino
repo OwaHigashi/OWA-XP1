@@ -478,6 +478,9 @@ bool setModeFromCommand(const char* modeName);
 bool setGroupFromCommand(const char* groupName);
 bool parseIntValue(const char* token, int& outValue);
 bool tokenEqualsIgnoreCase(const char* lhs, const char* rhs);
+bool applyStartupMode(const char* name);
+void drawMidiMonitor(bool lit);
+void updateMidiMonitor(void);
 const char* getDisplayModeLabel(DisplayMode mode);
 const char* getBtStatusLabel(BT_STATUS status);
 bool isUsbBinaryTransferActive(void);
@@ -611,6 +614,12 @@ bool allNotesOffEnabled = false;
 unsigned long midiInCount = 0;
 unsigned long midiOutCount = 0;
 unsigned long g_lastMidiInputAt = 0;
+// 左上の小さな MIDI モニタ: millis() < g_midiBlinkUntil の間だけ点灯。Note On/Off
+// を受信するたびに再アーム (= now + 点灯幅) して点滅させる。g_midiBlinkShown は
+// 直近に描いた点灯状態 (ループ側で状態が変わったときだけ最小限の再描画をする)。
+unsigned long g_midiBlinkUntil = 0;
+bool g_midiBlinkShown = false;
+const unsigned long MIDI_BLINK_MS = 60;  // 1メッセージあたりの点灯時間
 char g_lastMidiRxLabel[32] = "RX:--";
 bool g_btBondSavePending = false;
 bool g_seqSavePending = false;
@@ -1321,9 +1330,9 @@ void key_callback(uint8_t *p_msg)
     portEXIT_CRITICAL(&g_keyStateMux);
 }
 
-// ---- 起動スプラッシュ "OWAMIDICON-Core2" ----
+// ---- 起動スプラッシュ "OWA-XP1 MIDICON" ----
 // Mirrors M5Tab-MIDIXposeFil / M5Core2-MIDITransposerBT (commit aeda99b) for
-// a consistent boot identity across the OWAMIDICON sibling sketches: double
+// a consistent boot identity across the OWA-XP1 sibling sketches: double
 // frame, deco lines with corner accent dots, faded title, subtitle, progress
 // bar, footer. Geometry/font scaled down for the 320×240 panel; animation
 // timing, fade math, and progress-bar logic match Tab5's drawSplash() 1:1.
@@ -1400,7 +1409,7 @@ static bool showSplashScreen() {
     uint16_t tcol = M5.Lcd.color565(lum, lum, lum);
     if (tcol != lastTitleCol) {
       M5.Lcd.setTextColor(tcol, TFT_BLACK);
-      M5.Lcd.drawString("OWAMIDICON-Core2", cx, cy - 10);
+      M5.Lcd.drawString("OWA-XP1 MIDICON", cx, cy - 10);
       lastTitleCol = tcol;
     }
 
@@ -1559,10 +1568,83 @@ static void updMaybeScreenshot() {
   }
 }
 
+// ---- /config.ini : simple KEY=VALUE persistent settings on the SD root ------
+// Plain text, one "key=value" per line. Blank lines and lines starting with '#'
+// or ';' are comments. Keys are case-insensitive; whitespace around the key and
+// around the value is trimmed (a value may still contain interior spaces, e.g.
+// an SSID with a space). cfgSet() preserves every other line (including comments
+// and unknown keys) so new settings can be added over time without losing old
+// ones, and commits via a temp file + rename so a power loss never corrupts it.
+static constexpr char CFG_FILE[]     = "/config.ini";
+static constexpr char CFG_TMP[]      = "/config.ini.tmp";
+static constexpr char CFG_KEY_SSID[] = "SSID";   // last working Wi-Fi SSID
+static constexpr char CFG_KEY_PASS[] = "PASS";   // its password (stored in clear)
+
+// Read the value for `key` (case-insensitive). Returns "" if the file or key is
+// absent.
+static String cfgGet(const char *key) {
+  File f = SD.open(CFG_FILE, FILE_READ);
+  if (!f) return "";
+  String want = String(key); want.toLowerCase();
+  String val = "";
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0 || line[0] == '#' || line[0] == ';') continue;
+    int eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    String k = line.substring(0, eq); k.trim(); k.toLowerCase();
+    if (k == want) { val = line.substring(eq + 1); val.trim(); break; }
+  }
+  f.close();
+  return val;
+}
+
+// Insert or replace key=value, preserving all other lines. Returns true on
+// success. Writes to a temp file then renames over the original (atomic-ish).
+static bool cfgSet(const char *key, const String &value) {
+  String want = String(key); want.toLowerCase();
+  String out = "";
+  bool replaced = false;
+  File f = SD.open(CFG_FILE, FILE_READ);
+  if (f) {
+    while (f.available()) {
+      String line = f.readStringUntil('\n');
+      if (line.endsWith("\r")) line.remove(line.length() - 1);   // tolerate CRLF
+      String t = line; t.trim();
+      bool comment = (t.length() == 0 || t[0] == '#' || t[0] == ';');
+      if (!comment) {
+        int eq = t.indexOf('=');
+        if (eq > 0) {
+          String k = t.substring(0, eq); k.trim(); k.toLowerCase();
+          if (k == want) { out += String(key) + "=" + value + "\n"; replaced = true; continue; }
+        }
+      }
+      out += line + "\n";
+    }
+    f.close();
+  }
+  if (!replaced) out += String(key) + "=" + value + "\n";
+
+  SD.remove(CFG_TMP);
+  File w = SD.open(CFG_TMP, FILE_WRITE);
+  if (!w) return false;
+  bool ok = (w.print(out) == out.length());
+  w.flush();
+  w.close();
+  if (!ok) { SD.remove(CFG_TMP); return false; }
+  if (SD.exists(CFG_FILE)) SD.remove(CFG_FILE);
+  return SD.rename(CFG_TMP, CFG_FILE);
+}
+
 // ---- Wi-Fi scan + SSID selection ------------------------------------------
-// Returns the chosen network index and fills outSsid, or -1 if no networks.
-// A Cancel tap reboots (does not return).
-static int updWifiScanAndSelect(String &outSsid) {
+// Returns the chosen network index (>=0) or -1 if no networks were found.
+// On a normal SEL it fills outSsid (password entered later via the keyboard).
+// On ReUSE it fills outSsid+outPass from /config.ini and sets outReuse=true so
+// the caller skips the keyboard. There is no on-screen Cancel: pressing the
+// device reset button aborts update mode.
+static int updWifiScanAndSelect(String &outSsid, String &outPass, bool &outReuse) {
+  outReuse = false;
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(100);
@@ -1573,14 +1655,18 @@ static int updWifiScanAndSelect(String &outSsid) {
   int n = WiFi.scanNetworks(false /*async*/, false /*hidden*/, false /*passive*/, 400);
   if (n <= 0) return -1;
 
+  // Whether the SD card already holds saved Wi-Fi credentials governs whether
+  // the ReUSE button is live (blue) or dimmed (gray, taps just say "none saved").
+  bool haveSaved = cfgGet(CFG_KEY_SSID).length() > 0;
+
   // Big reverse-video cursor list: UP/DOWN move the highlight, SELECT confirms.
   // Only `rows` are visible at once but ALL n networks are reachable by scrolling.
   const int rows  = 6;          // visible rows (the list scrolls for more)
   const int rowH  = 26;
   const int listY = 28;
-  // Bottom button bar: [UP] [DOWN] [SELECT] [Cancel]
+  // Bottom button bar: [DOWN] [UP] [SEL] [ReUSE]  (Cancel = device reset button)
   const int byTop = 190, bH = 44, bW = 76;
-  const int upX = 4, dnX = 84, selX = 164, caX = 244;
+  const int dnX = 4, upX = 84, selX = 164, reuseX = 244;
 
   int sel = 0;     // highlighted network index
   int top = 0;     // first visible index
@@ -1595,7 +1681,7 @@ static int updWifiScanAndSelect(String &outSsid) {
       uiFontSmall();
       M5.Lcd.setTextColor(TFT_CYAN, TFT_BLACK);
       char hdr[48];
-      snprintf(hdr, sizeof(hdr), "Wi-Fi %d/%d  (UP/DOWN scroll)", sel + 1, n);
+      snprintf(hdr, sizeof(hdr), "Wi-Fi %d/%d  tap or DOWN/UP", sel + 1, n);
       uiDrawL(hdr, 8, 6);
 
       for (int i = 0; i < rows; i++) {
@@ -1619,26 +1705,53 @@ static int updWifiScanAndSelect(String &outSsid) {
         M5.Lcd.drawString(r, 305, y + 5);
       }
 
-      // button bar
-      M5.Lcd.fillRoundRect(upX,  byTop, bW, bH, 5, 0x2945);
-      M5.Lcd.fillRoundRect(dnX,  byTop, bW, bH, 5, 0x2945);
-      M5.Lcd.fillRoundRect(selX, byTop, bW, bH, 5, 0x05A0);
-      M5.Lcd.fillRoundRect(caX,  byTop, bW, bH, 5, TFT_RED);
+      // button bar: [DOWN] [UP] [SEL] [ReUSE].  ReUSE is blue when /config.ini
+      // holds saved credentials, dimmed gray otherwise.
+      uint16_t reuseCol = haveSaved ? 0x021F : 0x39E7;
+      M5.Lcd.fillRoundRect(dnX,    byTop, bW, bH, 5, 0x2945);
+      M5.Lcd.fillRoundRect(upX,    byTop, bW, bH, 5, 0x2945);
+      M5.Lcd.fillRoundRect(selX,   byTop, bW, bH, 5, 0x05A0);
+      M5.Lcd.fillRoundRect(reuseX, byTop, bW, bH, 5, reuseCol);
       M5.Lcd.setTextColor(TFT_WHITE, 0x2945);
-      uiDrawC("UP",   upX, byTop, bW, bH);
       uiDrawC("DOWN", dnX, byTop, bW, bH);
+      uiDrawC("UP",   upX, byTop, bW, bH);
       M5.Lcd.setTextColor(TFT_WHITE, 0x05A0);
-      uiDrawC("SELECT", selX, byTop, bW, bH);
-      M5.Lcd.setTextColor(TFT_WHITE, TFT_RED);
-      uiDrawC("Cancel", caX, byTop, bW, bH);
+      uiDrawC("SEL", selX, byTop, bW, bH);
+      M5.Lcd.setTextColor(TFT_WHITE, reuseCol);
+      uiDrawC("ReUSE", reuseX, byTop, bW, bH);
       dirty = false;
     }
 
     TouchPoint_t p;
     if (updGetTap(p)) {
-      if (touchInRect(p, caX,  byTop, bW, bH)) ESP.restart();
+      // Tap a visible list row to MOVE THE CURSOR there. This never advances on
+      // its own -- SEL must still be pressed to confirm the highlighted network.
+      if (p.y >= listY && p.y < listY + rows * rowH && p.x >= 6 && p.x <= 314) {
+        int i = (p.y - listY) / rowH, idx = top + i;
+        if (idx >= 0 && idx < n) { sel = idx; dirty = true; }
+        continue;
+      }
       if (touchInRect(p, upX,  byTop, bW, bH)) { if (sel > 0)     { sel--; dirty = true; } continue; }
       if (touchInRect(p, dnX,  byTop, bW, bH)) { if (sel < n - 1) { sel++; dirty = true; } continue; }
+      if (touchInRect(p, reuseX, byTop, bW, bH)) {
+        // Re-use the Wi-Fi credentials saved on the SD card (/config.ini),
+        // skipping the on-screen keyboard. If nothing is saved, say so and stay.
+        String sv = cfgGet(CFG_KEY_SSID);
+        if (sv.length() == 0) {
+          M5.Lcd.fillRoundRect(40, 96, 240, 48, 6, TFT_RED);
+          M5.Lcd.setTextColor(TFT_WHITE, TFT_RED);
+          uiFontSmall();
+          uiDrawC("No saved Wi-Fi", 40, 96, 240, 48);
+          delay(1200);
+          dirty = true;
+          continue;
+        }
+        outSsid  = sv;
+        outPass  = cfgGet(CFG_KEY_PASS);
+        outReuse = true;
+        WiFi.scanDelete();
+        return sel;
+      }
       if (touchInRect(p, selX, byTop, bW, bH)) {
         outSsid = WiFi.SSID(sel);
         WiFi.scanDelete();
@@ -1738,7 +1851,8 @@ static int kbHit(const TouchPoint_t &p, int layer, char &outChar) {
   }
   return KBA_NONE;
 }
-// Returns true if OK pressed (pass filled). Cancel reboots.
+// Returns true if OK pressed (outPass filled), or false if the on-screen Cancel
+// key was pressed (the caller goes back to the Wi-Fi selection screen).
 static bool updKeyboardGetPassword(const char *ssid, String &outPass) {
   outPass = "";
   int layer = 0;
@@ -1748,8 +1862,8 @@ static bool updKeyboardGetPassword(const char *ssid, String &outPass) {
   while (true) {
     TouchPoint_t p;
     if (updGetTap(p)) {
-      // Cancel key (function row, x>=256) -> reboot
-      if (p.y >= KB_FY && p.y < KB_FY + KB_FH && p.x >= 256) ESP.restart();
+      // Cancel key (function row, x>=256) -> abort entry; back to the Wi-Fi list.
+      if (p.y >= KB_FY && p.y < KB_FY + KB_FH && p.x >= 256) return false;
       char ch = 0;
       int a = kbHit(p, layer, ch);
       switch (a) {
@@ -2111,18 +2225,41 @@ static void runUpdateMode() {
     ESP.restart();
   }
 
-  String ssid, pass;
-  if (updWifiScanAndSelect(ssid) < 0) {
-    updMsg("No Wi-Fi found.", TFT_RED);
-    delay(2000);
-    ESP.restart();
-  }
-  // password entry + connect; wrong password -> re-enter
+  // Acquire a working Wi-Fi connection. Outer loop: select a network -> connect
+  // (ReUSE saved creds, or enter a password). ANY failure -- a bad password, a
+  // connect timeout, ReUSE that no longer works, or the keyboard Cancel -- drops
+  // back to the Wi-Fi selection screen so the user can pick again. The only way
+  // out of update mode is the device reset button.
   while (true) {
-    if (!updKeyboardGetPassword(ssid.c_str(), pass)) ESP.restart();  // Cancel
-    if (updWifiConnect(ssid.c_str(), pass.c_str(), 15000)) break;
-    updMsg("Connect failed.\nRe-enter password.", TFT_RED);
-    delay(1500);
+    String ssid, pass;
+    bool reuse = false;
+    if (updWifiScanAndSelect(ssid, pass, reuse) < 0) {
+      updMsg("No Wi-Fi found.", TFT_RED);
+      delay(2000);
+      ESP.restart();
+    }
+
+    if (reuse) {
+      // Saved credentials: connect directly; on failure return to the list.
+      if (updWifiConnect(ssid.c_str(), pass.c_str(), 15000)) break;
+      updMsg("Saved Wi-Fi failed.\nPick a network.", TFT_RED);
+      delay(1500);
+      continue;
+    }
+
+    // Manual: enter the password once, then connect. Cancel or a failed connect
+    // returns to the Wi-Fi list (no silent retry on the same network).
+    if (!updKeyboardGetPassword(ssid.c_str(), pass)) continue;  // keyboard Cancel
+    if (!updWifiConnect(ssid.c_str(), pass.c_str(), 15000)) {
+      updMsg("Connect failed.\nPick a network.", TFT_RED);
+      delay(1500);
+      continue;
+    }
+    // Connected: remember the working credentials so next time ReUSE can skip
+    // the keyboard.
+    cfgSet(CFG_KEY_SSID, ssid);
+    cfgSet(CFG_KEY_PASS, pass);
+    break;
   }
 
   // Remember our current version (first line of the previously applied list).
@@ -2236,11 +2373,19 @@ void setup() {
   initInstantModeButtons();
   initSequenceModeButtons();
   initMidiManagementDefaults();
+  // 開始画面: /config.ini の SETUP=... があればその画面へ。無い / 未知の値なら
+  // ビルド既定 (synth ビルドは Player、それ以外は Direct)。SD は上の
+  // checkSDUpdater() で既にマウント済み。
+  {
+    String startup = cfgGet("SETUP");
+    if (startup.length() == 0 || !applyStartupMode(startup.c_str())) {
 #if MIDIXPOSE_HAS_LOCAL_SYNTH
-  enterDisplayMode(PLAY_MODE);
+      enterDisplayMode(PLAY_MODE);
 #else
-  enterDisplayMode(DIRECT_MODE);
+      enterDisplayMode(DIRECT_MODE);
 #endif
+    }
+  }
 
   // SDカード状態確認
   if (SD.cardType() == CARD_NONE) {
@@ -2384,6 +2529,9 @@ void loop() {
       updateStatusArea();
       needPartialUpdate = false;
     }
+
+    // 左上 MIDI モニタの点滅 (受信状態が変わったときだけ最小再描画)
+    updateMidiMonitor();
 
     lastUICheck = now;
   }
@@ -2619,14 +2767,17 @@ void drawInterface() {
 
   uiFontSmall();
 
-  // ── Row 1 (y=2) : タイトル + 転調値 ──
+  // ── Row 1 (y=2) : [MIDIモニタ] タイトル + 転調値 ──
+  // 左上隅は MIDI 受信モニタ、その右1文字ぶん空けてモード名を置く。
+  drawMidiMonitor(millis() < g_midiBlinkUntil);
   M5.Lcd.setTextColor(WHITE);
+  const int titleX = 22;   // モニタ(～x=15)の右、1文字ぶん寄せた位置
   if (currentMode == PLAY_MODE) {
-    uiDrawL("MIDI Player", 10, 2);
+    uiDrawL("MIDI Player", titleX, 2);
   } else if (currentMode == MIDI_MANAGE_MODE) {
-    uiDrawL(midiManagePage == MIDI_PAGE_FILTER ? "MIDI Filter" : "MIDI Mapper", 10, 2);
+    uiDrawL(midiManagePage == MIDI_PAGE_FILTER ? "MIDI Filter" : "MIDI Mapper", titleX, 2);
   } else {
-    uiDrawL("MIDI Transposer", 10, 2);
+    uiDrawL("MIDI Transposer", titleX, 2);
   }
 
   // ── Row 2 (y=22) : AllOff | BT | I/O | ボタン補助 ──
@@ -2662,7 +2813,7 @@ void drawInterface() {
     } else {
       hint = "B:Action";
     }
-    uiDrawL(hint, 200, 22);
+    uiDrawL(hint, 140, 22);  // 右端で切れていたので左へ寄せる (BT表示の右隣)
   }
 
   // ── ヘッダ下の区切り線 (y=40) ──
@@ -4546,6 +4697,24 @@ void drawMidiManageMode() {
   }
 }
 
+// 左上隅の小さな MIDI 受信モニタ。lit=点灯(緑)/消灯(暗)。タイトル文字はこの右に
+// 1文字ぶん寄せてあるので、この四角と重ならない。
+const int MIDI_MON_X = 3, MIDI_MON_Y = 3, MIDI_MON_W = 12, MIDI_MON_H = 12;
+void drawMidiMonitor(bool lit) {
+  uint16_t fill = lit ? GREEN : 0x18C3;   // 点灯=緑 / 消灯=暗いグレー
+  M5.Lcd.fillRoundRect(MIDI_MON_X, MIDI_MON_Y, MIDI_MON_W, MIDI_MON_H, 2, fill);
+  M5.Lcd.drawRoundRect(MIDI_MON_X, MIDI_MON_Y, MIDI_MON_W, MIDI_MON_H, 2, DARKGREY);
+  g_midiBlinkShown = lit;
+}
+
+// loop() から毎周回呼ぶ。点灯状態が変わったときだけモニタ四角を再描画して点滅させる
+// (SMF プレーヤー画面はレイアウトが別なので出さない)。
+void updateMidiMonitor(void) {
+  if (currentMode == SMF_PLAYER_MODE) return;
+  bool lit = (millis() < g_midiBlinkUntil);
+  if (lit != g_midiBlinkShown) drawMidiMonitor(lit);
+}
+
 void updateStatusArea() {
   // 右上の動的ステータスエリア (Row1 右側のみ)
   // Row2 は AllOff/BT/Hint が居るので触らない
@@ -4566,16 +4735,8 @@ void updateStatusArea() {
     M5.Lcd.setTextColor(YELLOW);
     uiDrawL(buf, 240, 2);
   }
-
-  // I/O カウンタ (PLAY モードでは右端まで使えるので右寄せにする)
-  M5.Lcd.setTextColor(DARKGREY);
-  snprintf(buf, sizeof(buf), "I:%lu O:%lu", midiInCount, midiOutCount);
-  if (currentMode == PLAY_MODE) {
-    int w = M5.Lcd.textWidth(buf);
-    uiDrawL(buf, SCREEN_WIDTH - w - 6, 2);
-  } else {
-    uiDrawL(buf, 165, 2);
-  }
+  // ノート数 (I:/O:) は転調値と重なって煩雑なため非表示。カウンタ自体は PLAY 画面の
+  // OUT 表示や STATUS コマンドで使うので残してある (midiInCount / midiOutCount)。
 }
 
 // フットスイッチによる転調値選択処理
@@ -4872,14 +5033,25 @@ void processHardwareButtons() {
     return;
   }
 
-  if (now - lastButtonCheck < BUTTON_DEBOUNCE) return;
-
-  // 左ボタン（A）: All Notes Off切り替え
-  if (M5.BtnA.wasPressed()) {
-    handleButtonAAction();
-    lastButtonCheck = now;
-    return;
+  // 左ボタン（A）: 全モード共通。短押し(離した時)=All Notes Off を送信、
+  // 長押し=All Notes Off モードの ON/OFF 切替。C と同様、短押しは release で発火し、
+  // 押下中に長押しが成立していたら短押しを抑止する。
+  if (M5.BtnA.isPressed()) {
+    if (!btnALongPressHandled && M5.BtnA.pressedFor(MODE_LONG_PRESS_MS)) {
+      handleButtonALongAction();
+      btnALongPressHandled = true;
+      lastButtonCheck = now;
+    }
+  } else {
+    if (M5.BtnA.wasReleasefor(0) && !btnALongPressHandled &&
+        (now - lastButtonCheck >= BUTTON_DEBOUNCE)) {
+      handleButtonAAction();
+      lastButtonCheck = now;
+    }
+    btnALongPressHandled = false;
   }
+
+  if (now - lastButtonCheck < BUTTON_DEBOUNCE) return;
 
   // 真ん中ボタン（B）
   if (M5.BtnB.wasPressed()) {
@@ -5439,6 +5611,8 @@ bool parseIntValue(const char* token, int& outValue) {
   return true;
 }
 
+// A 短押し: 全モード共通で All Notes Off を「送信」する。
+// (SMF Player だけは従来どおり A=曲戻り/選曲ページ送りを維持)
 void handleButtonAAction() {
   if (currentMode == SMF_PLAYER_MODE) {
     // 選曲画面表示中は前ページ、通常画面は曲戻り。
@@ -5446,14 +5620,20 @@ void handleButtonAAction() {
     else                    smfPlayerGotoSong(-1);
     return;
   }
-  allNotesOffEnabled = !allNotesOffEnabled;
-  needFullRedraw = true;
-  Serial.printf("All Notes Off: %s\n", allNotesOffEnabled ? "ON" : "OFF");
+  sendAllNotesOff();
+  Serial.println("All Notes Off sent (Btn A short)");
 }
 
-// A 長押し: 便利な即選曲画面（フォルダブラウザ）の開閉。
+// A 長押し: 全モード共通で All Notes Off モード(転調時などの自動送出)の ON/OFF を切替。
+// (SMF Player だけは従来どおり A 長押し=便利な即選曲画面の開閉を維持)
 void handleButtonALongAction() {
-  if (currentMode == SMF_PLAYER_MODE) smfBrowserToggle();
+  if (currentMode == SMF_PLAYER_MODE) {
+    smfBrowserToggle();
+    return;
+  }
+  allNotesOffEnabled = !allNotesOffEnabled;
+  needFullRedraw = true;
+  Serial.printf("All Notes Off mode: %s\n", allNotesOffEnabled ? "ON" : "OFF");
 }
 
 // B 長押し: A 長押しと同じく選曲画面の開閉。
@@ -5637,6 +5817,65 @@ bool setModeFromCommand(const char* modeName) {
     enterDisplayMode(MIDI_MANAGE_MODE);
     midiManagePage = MIDI_PAGE_FILTER;
     needFullRedraw = true;
+    return true;
+  }
+  return false;
+}
+
+// /config.ini の SETUP=... が指す開始画面へジャンプする。大文字小文字は区別しない。
+// 認識できたら true。旧キーワード (Origin/Relative/Synth/MIDI) も別名として受け付ける。
+//   Player / Synth        -> MIDI Player (PLAY_MODE)
+//   Transposer            -> 転調トップ (前回の転調モード / 初期 Direct)
+//   Direct                -> Direct 転調
+//   Key / Origin          -> Key 転調 (KEY_MODE)
+//   Instant / Relative    -> Instant 転調 (INSTANT_MODE)
+//   Sequence              -> Sequence 転調
+//   Filter / MIDI         -> MIDI Filter (MIDI_MANAGE_MODE, Filter ページ)
+//   Mapper                -> MIDI Mapper (MIDI_MANAGE_MODE, Mapper ページ)
+//   SMF                   -> SMF プレーヤー (SMF_PLAYER_MODE)
+bool applyStartupMode(const char* name) {
+  if (name == nullptr || *name == '\0') return false;
+
+  if (tokenEqualsIgnoreCase(name, "Player") || tokenEqualsIgnoreCase(name, "Synth") ||
+      tokenEqualsIgnoreCase(name, "PLAY")) {
+    enterDisplayMode(PLAY_MODE);
+    return true;
+  }
+  if (tokenEqualsIgnoreCase(name, "Transposer") || tokenEqualsIgnoreCase(name, "Transpose")) {
+    DisplayMode m = isTransposeDisplayMode(lastTransposeMode) ? lastTransposeMode : DIRECT_MODE;
+    enterDisplayMode(m);
+    return true;
+  }
+  if (tokenEqualsIgnoreCase(name, "Direct")) {
+    enterDisplayMode(DIRECT_MODE);
+    return true;
+  }
+  if (tokenEqualsIgnoreCase(name, "Key") || tokenEqualsIgnoreCase(name, "Origin")) {
+    enterDisplayMode(KEY_MODE);
+    return true;
+  }
+  if (tokenEqualsIgnoreCase(name, "Instant") || tokenEqualsIgnoreCase(name, "Relative")) {
+    enterDisplayMode(INSTANT_MODE);
+    return true;
+  }
+  if (tokenEqualsIgnoreCase(name, "Sequence") || tokenEqualsIgnoreCase(name, "Seq")) {
+    enterDisplayMode(SEQUENCE_MODE);
+    return true;
+  }
+  if (tokenEqualsIgnoreCase(name, "Filter") || tokenEqualsIgnoreCase(name, "MIDI")) {
+    enterDisplayMode(MIDI_MANAGE_MODE);
+    midiManagePage = MIDI_PAGE_FILTER;
+    needFullRedraw = true;
+    return true;
+  }
+  if (tokenEqualsIgnoreCase(name, "Mapper")) {
+    enterDisplayMode(MIDI_MANAGE_MODE);
+    midiManagePage = MIDI_PAGE_MAPPER;
+    needFullRedraw = true;
+    return true;
+  }
+  if (tokenEqualsIgnoreCase(name, "SMF") || tokenEqualsIgnoreCase(name, "SMFPlayer")) {
+    enterDisplayMode(SMF_PLAYER_MODE);
     return true;
   }
   return false;
@@ -6094,6 +6333,11 @@ void recordMidiRxDebug(const uint8_t* bytes, uint8_t length, bool hasChannel, in
 
 void handleParsedMidiMessage(const MidiMessage& inMsg) {
   recordMidiRxDebug(inMsg.bytes, inMsg.length, inMsg.hasChannel, inMsg.channel);
+
+  // 左上 MIDI モニタを点滅させる。Note On / Note Off の両方で反応 (どのモードでも)。
+  if (inMsg.kind == MIDI_KIND_NOTE_ON || inMsg.kind == MIDI_KIND_NOTE_OFF) {
+    g_midiBlinkUntil = millis() + MIDI_BLINK_MS;
+  }
 
   if (currentMode == PLAY_MODE) {
     if (inMsg.hasChannel && inMsg.channel >= 0) {
