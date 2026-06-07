@@ -1423,7 +1423,7 @@ static bool showSplashScreen() {
 //  manifest, applies only the entries newer than what it last applied, then
 //  force-flashes the firmware via M5Stack-SD-Updater and reboots.
 //
-//  Manifest format (downloadlist.txt) -- '#' line = version marker, others are
+//  Manifest format (firmupdate.txt) -- '#' line = version marker, others are
 //  entries; blank lines ignored. The FIRST line MUST be "#<latest>" (the newest
 //  version integer); below it the changelog blocks are listed OLDEST -> NEWEST,
 //  each headed by its own "#<n>":
@@ -1438,12 +1438,15 @@ static bool showSplashScreen() {
 //      U:jpg/new.jpg
 //
 //  The device remembers its version as the first line of the SAVED
-//  /downloadlist.txt on the SD card. On entry it downloads the new manifest and:
+//  /firmupdate.txt on the SD card. On entry it downloads the new manifest and:
 //    - if the new first-line version == the saved version -> "Up to date", nothing.
 //    - else it applies, in file order, every U:/E: entry whose enclosing "#<n>"
 //      block is GREATER than the saved version (so a device several versions
-//      behind never skips an intermediate release). On success it saves the new
-//      manifest as /downloadlist.txt (recording the new version).
+//      behind never skips an intermediate release). On success it atomically
+//      promotes the in-progress /firmupdate.txt.ongoing to /firmupdate.txt
+//      (recording the new version); on ANY failure the .ongoing copy is
+//      discarded and the old /firmupdate.txt is kept, so an interrupted update
+//      always retries next time instead of looking "done".
 //  If the manifest itself cannot be fetched (e.g. 404) -> "No Updater" screen.
 //  No compression anywhere.
 // ============================================================================
@@ -1451,13 +1454,24 @@ static bool showSplashScreen() {
 static constexpr char UPD_MANIFEST_URL[] = "http://west.yokohama/OWA/XP1/firmupdate.txt";
 static constexpr char UPD_BASE_URL[]     = "http://west.yokohama/OWA/XP1/SDimg/";
 static constexpr char UPD_BOOT_BIN[]     = "/OWA-XP1.bin";
-static constexpr char UPD_PART_FILE[]    = "/download.part";    // per-file download temp (mv to dest)
-static constexpr char UPD_NEW_FILE[]     = "/downloadlist.new"; // freshly downloaded manifest (transient)
-static constexpr char UPD_LIST_FILE[]    = "/downloadlist.txt"; // last applied manifest (first line = current version)
+static constexpr char UPD_PART_FILE[]    = "/download.part";    // single ROOT download temp (moved to dest after each file)
+static constexpr char UPD_NEW_FILE[]     = "/firmupdate.txt.ongoing"; // in-progress manifest; promoted to UPD_LIST_FILE only on FULL success
+static constexpr char UPD_LIST_FILE[]    = "/firmupdate.txt";         // last APPLIED manifest (first line = current version)
+
+// Outcome of one U: file download. NOT_FOUND (HTTP 404 = the source file is
+// simply absent on the server) is silently ignored, NOT counted as a failure;
+// only ERROR (connection drop, SD write/rename failure, ...) counts.
+static constexpr int UPD_DL_OK        = 0;
+static constexpr int UPD_DL_NOT_FOUND = 1;
+static constexpr int UPD_DL_ERROR     = 2;
 
 // On-screen Cancel button (shared across all update-mode screens).
 static const int UPD_CX = 224, UPD_CY = 206, UPD_CW = 90, UPD_CH = 30;
 static int gUpdFails = 0;  // count of failed U: downloads (reported at the end)
+// Set true when THIS update run successfully (re)downloaded the boot firmware bin
+// (/OWA-XP1.bin). The flash chip is rewritten only when this is true, so updates
+// that ship only data files never wear the flash.
+static bool gBootBinUpdated = false;
 
 // Serial-injected tap (for scriptable screenshots/automation of update mode).
 // Set by the "UPDTAP x y" serial command; consumed once by updGetTap().
@@ -1796,11 +1810,14 @@ static bool updWifiConnect(const char *ssid, const char *pass, uint32_t timeoutM
 // ---- download one URL to a temp file on SD, with progress -----------------
 // destTmp is the SD path written to (verified, then the caller mv's it).
 // A Cancel tap during download reboots. Returns true on a verified download.
-static bool updDownloadFile(const char *url, const char *label, const char *destTmp) {
+static int updDownloadFile(const char *url, const char *label, const char *destTmp) {
   HTTPClient http;
-  if (!http.begin(url)) return false;
+  if (!http.begin(url)) return UPD_DL_ERROR;
   int code = http.GET();
-  if (code != HTTP_CODE_OK) { http.end(); return false; }
+  if (code != HTTP_CODE_OK) {
+    http.end();
+    return (code == HTTP_CODE_NOT_FOUND) ? UPD_DL_NOT_FOUND : UPD_DL_ERROR;  // 404 -> ignore
+  }
   int len = http.getSize();             // -1 if unknown/chunked
   WiFiClient *st = http.getStreamPtr();
 
@@ -1857,6 +1874,7 @@ static bool updDownloadFile(const char *url, const char *label, const char *dest
         uiDrawL(b, 10, barY + 24);
       }
       M5.update();
+      updMaybeScreenshot();   // allow capturing the download screen for the manual
     }
   }
   f.flush();
@@ -1866,8 +1884,8 @@ static bool updDownloadFile(const char *url, const char *label, const char *dest
   // integrity: if Content-Length was known, bytes written must match exactly.
   if (ok && len >= 0 && written != (size_t)len) ok = false;
   if (ok && written == 0) ok = false;
-  if (!ok) SD.remove(destTmp);
-  return ok;
+  if (!ok) { SD.remove(destTmp); return UPD_DL_ERROR; }
+  return UPD_DL_OK;
 }
 
 // Create any missing parent directories for an SD path like "/smf/a/b.mid".
@@ -1880,26 +1898,79 @@ static void updEnsureParentDirs(const String &sdPath) {
   }
 }
 
-// Apply one U: entry. relPath is relative to UPD_BASE_URL and SD root.
-static bool updApplyOneUpdate(const String &relPath) {
-  String url  = String(UPD_BASE_URL) + relPath;
-  String dest = "/" + relPath;
-  if (!updDownloadFile(url.c_str(), dest.c_str(), UPD_PART_FILE)) return false;
-  updEnsureParentDirs(dest);
+// Move the single ROOT download temp to its final SD path. A same-volume rename
+// is tried first (fast, no data copy); if it fails -- cross-directory renames are
+// unreliable on the ESP32 SD/FAT layer -- we fall back to a byte copy then delete
+// the temp. Keeping ONE temp at the root means an interrupted update can never
+// scatter stray ".part" files across folders.
+static bool updPromoteToDest(const char *tmp, const String &dest) {
   if (SD.exists(dest)) SD.remove(dest);
-  return SD.rename(UPD_PART_FILE, dest);   // atomic promote
+  if (SD.rename(tmp, dest)) return true;          // fast path
+  File in = SD.open(tmp, FILE_READ);
+  if (!in) return false;
+  File out = SD.open(dest, FILE_WRITE);
+  if (!out) { in.close(); return false; }
+  uint8_t buf[1460];
+  bool ok = true;
+  while (in.available()) {
+    int r = in.read(buf, sizeof(buf));
+    if (r <= 0) { ok = false; break; }
+    if (out.write(buf, (size_t)r) != (size_t)r) { ok = false; break; }   // SD full / write error
+  }
+  out.flush();
+  out.close();
+  in.close();
+  if (ok) SD.remove(tmp);                          // success: drop the temp
+  else    SD.remove(dest);                         // failure: don't leave a partial dest
+  return ok;
 }
 
-// Apply one E: entry.
+// Apply one U: entry. relPath is relative to UPD_BASE_URL and SD root. The file
+// always lands on the single root temp first; missing parent folders are created
+// before it is moved into place.
+static int updApplyOneUpdate(const String &relPath) {
+  String url  = String(UPD_BASE_URL) + relPath;
+  String dest = "/" + relPath;
+  int res = updDownloadFile(url.c_str(), dest.c_str(), UPD_PART_FILE);
+  if (res != UPD_DL_OK) { SD.remove(UPD_PART_FILE); return res; }   // 404 ignored / real error
+  updEnsureParentDirs(dest);                        // create missing folders before the move
+  if (!updPromoteToDest(UPD_PART_FILE, dest)) return UPD_DL_ERROR;
+  if (dest == UPD_BOOT_BIN) gBootBinUpdated = true; // firmware bin refreshed this run
+  return UPD_DL_OK;
+}
+
+// Recursively delete an SD path: a file is removed directly; a directory has all
+// of its children deleted first (ESP32 SD.rmdir() only removes EMPTY dirs) and
+// then the now-empty directory itself. Never touches the boot firmware.
+static void updRemoveRecursive(const String &path) {
+  if (path == UPD_BOOT_BIN) return;        // never delete the boot firmware
+  File f = SD.open(path);
+  if (!f) return;
+  if (!f.isDirectory()) { f.close(); SD.remove(path); return; }
+  for (File entry = f.openNextFile(); entry; entry = f.openNextFile()) {
+    const char *nm = entry.name();
+    // name() may be a basename or a full path depending on core version; build a
+    // full child path defensively (same idiom as the SMF folder scan above).
+    String child;
+    if (nm && nm[0] == '/') child = nm;
+    else { child = path; if (!child.endsWith("/")) child += "/"; child += (nm ? nm : ""); }
+    entry.close();
+    updRemoveRecursive(child);            // handles both files and sub-directories
+  }
+  f.close();
+  SD.rmdir(path);
+}
+
+// Apply one E: entry. Deletes a file or a WHOLE directory tree, but REFUSES to
+// ever target the SD root: an empty path or "/" is ignored so a stray E: entry
+// can never wipe the entire card.
 static void updApplyOneDelete(const String &relPath) {
   String dest = "/" + relPath;
+  while (dest.length() > 1 && dest.endsWith("/")) dest.remove(dest.length() - 1);
+  if (dest.length() <= 1) return;          // "" or "/" -> root: never delete
   if (dest == UPD_BOOT_BIN) return;        // never delete the boot firmware
   if (!SD.exists(dest)) return;
-  File f = SD.open(dest);
-  bool isDir = f && f.isDirectory();
-  if (f) f.close();
-  if (isDir) SD.rmdir(dest);
-  else       SD.remove(dest);
+  updRemoveRecursive(dest);
 }
 
 // Read the first "#<int>" version marker from a manifest file's first
@@ -1922,32 +1993,67 @@ static int updReadFirstVersion(const char *path) {
   return ver;
 }
 
-// Apply the changelog in UPD_NEW_FILE in file order: every U:/E: entry whose
-// enclosing "#<n>" block is GREATER than storedVer. The first "#<latest>" header
-// line sets curBlock = latest, harmless (no entries precede the next marker).
+// Apply the changelog in UPD_NEW_FILE. Blocks may be listed in ANY order in the
+// file (newest-first is fine): we gather the distinct "#<n>" versions newer than
+// storedVer, then replay them in ASCENDING version order so a device several
+// versions behind applies intermediate releases in the right sequence (e.g. a v4
+// download always runs before a v5 delete of the same path). The quick "am I
+// current?" check elsewhere only reads each manifest's first line.
 static void updApplyChangelog(int storedVer) {
-  File f = SD.open(UPD_NEW_FILE, FILE_READ);
-  if (!f) return;
-  int curBlock = -1;
-  while (f.available()) {
-    String line = f.readStringUntil('\n');
-    line.trim();                            // drops trailing \r and spaces
-    if (line.length() == 0) continue;
-    if (line[0] == '#') {
+  const int MAXV = 64;
+  int vers[MAXV]; int nv = 0;
+
+  // Pass 1: collect the distinct block versions newer than storedVer.
+  {
+    File f = SD.open(UPD_NEW_FILE, FILE_READ);
+    if (!f) return;
+    while (f.available()) {
+      String line = f.readStringUntil('\n'); line.trim();
+      if (line.length() == 0 || line[0] != '#') continue;
       String num = line.substring(1); num.trim();
-      if (num.length() && (num[0] == '-' || isdigit((int)num[0]))) curBlock = num.toInt();
-      continue;
+      if (!num.length() || !(num[0] == '-' || isdigit((int)num[0]))) continue;
+      int v = num.toInt();
+      if (v <= storedVer) continue;
+      bool seen = false;
+      for (int i = 0; i < nv; i++) if (vers[i] == v) { seen = true; break; }
+      if (!seen && nv < MAXV) vers[nv++] = v;
     }
-    if (curBlock <= storedVer) continue;    // already applied in a past run
-    if (line.startsWith("E:")) {
-      String path = line.substring(2); path.trim();
-      if (path.length()) updApplyOneDelete(path);
-    } else if (line.startsWith("U:")) {
-      String path = line.substring(2); path.trim();
-      if (path.length() && !updApplyOneUpdate(path)) gUpdFails++;
-    }
+    f.close();
   }
-  f.close();
+
+  // Sort the versions ascending (insertion sort; nv is small).
+  for (int i = 1; i < nv; i++) {
+    int x = vers[i], j = i - 1;
+    while (j >= 0 && vers[j] > x) { vers[j + 1] = vers[j]; j--; }
+    vers[j + 1] = x;
+  }
+
+  // Pass 2: apply each version's entries in turn (top-to-bottom within its block).
+  for (int k = 0; k < nv; k++) {
+    int target = vers[k];
+    File f = SD.open(UPD_NEW_FILE, FILE_READ);
+    if (!f) return;
+    int curBlock = -1;
+    while (f.available()) {
+      String line = f.readStringUntil('\n'); line.trim();
+      if (line.length() == 0) continue;
+      if (line[0] == '#') {
+        String num = line.substring(1); num.trim();
+        if (num.length() && (num[0] == '-' || isdigit((int)num[0]))) curBlock = num.toInt();
+        continue;
+      }
+      if (curBlock != target) continue;     // only the version being applied now
+      if (line.startsWith("E:")) {
+        String path = line.substring(2); path.trim();
+        if (path.length()) updApplyOneDelete(path);
+      } else if (line.startsWith("U:")) {
+        String path = line.substring(2); path.trim();
+        // A missing source file (HTTP 404) is ignored; only real errors count.
+        if (path.length() && updApplyOneUpdate(path) == UPD_DL_ERROR) gUpdFails++;
+      }
+    }
+    f.close();
+  }
 }
 
 // Terminal screen: show a message plus [Power Off] and [Reboot] buttons.
@@ -1980,11 +2086,12 @@ static void updTerminalScreen(const char *msg, uint16_t color) {
   }
 }
 
-// Flash the (freshly updated) firmware and reboot into it.
+// Reboot, flashing the new firmware FIRST but only if this run actually refreshed
+// /OWA-XP1.bin -- otherwise just restart into the current firmware (no flash write).
 static void updForceBootAndRestart() {
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
-  if (SD.exists(UPD_BOOT_BIN)) {
+  if (gBootBinUpdated && SD.exists(UPD_BOOT_BIN)) {
     updateFromFS(SD, UPD_BOOT_BIN, TFCARD_CS_PIN);   // flashes + ESP.restart()
   }
   ESP.restart();
@@ -1994,6 +2101,7 @@ static void updForceBootAndRestart() {
 static void runUpdateMode() {
   gUpdateModeActive = true;   // so SCREENSHOT captures the live update screen
   gUpdFails = 0;
+  gBootBinUpdated = false;
   M5.Lcd.setBrightness(200);
   M5.Lcd.fillScreen(TFT_BLACK);
 
@@ -2023,8 +2131,8 @@ static void runUpdateMode() {
   // Download the new manifest to its own temp (NOT /download.part, which is
   // reused for per-file downloads during apply).
   updMsg("Fetching update list...", TFT_CYAN);
-  if (!updDownloadFile(UPD_MANIFEST_URL, "downloadlist.txt", UPD_NEW_FILE)) {
-    updTerminalScreen("No Updater", TFT_ORANGE);        // manifest missing (404)
+  if (updDownloadFile(UPD_MANIFEST_URL, "firmupdate.txt", UPD_NEW_FILE) != UPD_DL_OK) {
+    updTerminalScreen("No Updater", TFT_ORANGE);        // manifest missing / unreachable
   }
 
   int newVer = updReadFirstVersion(UPD_NEW_FILE);
@@ -2041,20 +2149,27 @@ static void runUpdateMode() {
   updApplyChangelog(storedVer);
 
   if (gUpdFails > 0) {
-    // Keep the old /downloadlist.txt so the (unchanged) version triggers a full
-    // retry next time -- do NOT record the new version on partial failure.
+    // Partial failure / interrupted: DISCARD the in-progress .ongoing manifest and
+    // keep the old committed /firmupdate.txt so the whole update retries next time.
+    // Do NOT flash -- reboot into the CURRENT firmware (the update did not succeed).
+    SD.remove(UPD_NEW_FILE);
     char m[48];
-    snprintf(m, sizeof(m), "%d file(s) failed.\nFlashing anyway...", gUpdFails);
+    snprintf(m, sizeof(m), "%d file(s) failed.\nWill retry next time.", gUpdFails);
     updMsg(m, TFT_ORANGE);
     delay(2500);
-  } else {
-    // Success: commit the new version by saving the manifest as the applied list.
-    SD.remove(UPD_LIST_FILE);
-    SD.rename(UPD_NEW_FILE, UPD_LIST_FILE);
-    updMsg("Updates applied.\nFlashing firmware...", TFT_GREEN);
-    delay(1200);
+    ESP.restart();
   }
-  updForceBootAndRestart();
+
+  // Success: atomically commit the new version by promoting the .ongoing manifest
+  // to the applied list (/firmupdate.txt).
+  SD.remove(UPD_LIST_FILE);
+  SD.rename(UPD_NEW_FILE, UPD_LIST_FILE);
+  // Flash ONLY when this run refreshed the firmware bin; data-only updates skip it
+  // (and so never wear the flash). Then reboot into whichever firmware now applies.
+  updMsg(gBootBinUpdated ? "Updates applied.\nFlashing firmware..."
+                         : "Updates applied.\nRebooting...", TFT_GREEN);
+  delay(1200);
+  updForceBootAndRestart();   // flashes only if gBootBinUpdated, else just restarts
   ESP.restart();
 }
 
@@ -2074,7 +2189,7 @@ void setup() {
   // splash enters the fully-isolated Wi-Fi update mode (before any MIDI /
   // Bluetooth init; never returns).
   // for SD-Updater
-  checkSDUpdater( SD, MENU_BIN, 2000, TFCARD_CS_PIN );
+  checkSDUpdater( SD, MENU_BIN, 500, TFCARD_CS_PIN );
 
   if (showSplashScreen()) {
     runUpdateMode();
