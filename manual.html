@@ -448,7 +448,10 @@
           <span class="tag long">長押し</span> All Notes Off <b>モード</b>の <b>ON / OFF</b> 切替<br>
           <small>全モード共通の動作です (SMF プレーヤーのみ A は曲操作)。</small>
         </td></tr>
-        <tr><td><span class="btn-icon B">B</span></td><td>現在のモードによって役割が変わる<br><span class="tag short">後述</span></td></tr>
+        <tr><td><span class="btn-icon B">B</span></td><td>
+          <span class="tag short">短押し</span> 現在のモードによって役割が変わる <span class="tag short">後述</span><br>
+          <span class="tag long">長押し</span> <b>電源オフ</b> (確認画面が出ます。全モード共通)
+        </td></tr>
         <tr><td><span class="btn-icon C">C</span></td><td>
           <span class="tag short">短押し</span> グループ内のモードを順送り<br>
           <span class="tag long">長押し</span> 転調グループ ⇄ MIDI Manager を切替
@@ -459,9 +462,27 @@
 
   <div class="callout">
     <b class="label">B ボタン(機能切り替え)</b>
-    B ボタンの役割は「いま何の画面を見ているか」で変化します。<br>
+    B ボタンの<b>短押し</b>の役割は「いま何の画面を見ているか」で変化します。<br>
     例えば DIRECT 画面では <b>レンジ切替</b> ですが、FILTER 画面では <b>Type を順送り</b> になります。
     各モードの説明にある「B の役割」を確認してください。
+  </div>
+
+  <h3>電源を切る (ソフト電源オフ)</h3>
+  <p>
+    <span class="btn-icon B">B</span> を<b>長押し</b>すると <code>Power Off?</code> の確認画面が出ます (図 4-1)。
+    <code>Power Off</code> をタップすると電源が切れます。<code>Cancel</code> または画面の他の場所をタップすると元の画面に戻ります。
+    全モード共通です。
+  </p>
+  <figure class="shot">
+    <div class="frame">
+      <img src="screenshots/11-poweroff.png" alt="電源オフ確認画面">
+    </div>
+    <figcaption>図 4-1: 電源オフの確認 (B 長押し)</figcaption>
+  </figure>
+  <div class="callout tip">
+    <b class="label">電源ボタンの長押しは不要</b>
+    本体側面の電源ボタンを 5 秒押し続けなくても、<b>B 長押し → タップ</b>の 2 ステップで安全に電源を切れます。
+    確認画面を挟むので、誤操作でいきなり電源が落ちることはありません。
   </div>
 </section>
 

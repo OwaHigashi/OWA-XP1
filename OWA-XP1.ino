@@ -538,6 +538,7 @@ void processSmfPlayerTouch(TouchPoint_t pos);
 void processSmfBrowserTouch(TouchPoint_t pos);
 void handleButtonALongAction();
 void handleButtonBLongAction();
+void confirmPowerOff();
 void sendMasterVolume(uint8_t vol);
 void smfPlayerDrawVolumeBar();
 
@@ -1489,6 +1490,11 @@ static volatile int gInjTapX = -1, gInjTapY = -1;
 // True once update mode is running. sendUsbSerialScreenshot() checks this so it
 // captures the live update-mode screen instead of redrawing the normal UI.
 static volatile bool gUpdateModeActive = false;
+
+// True while a transient normal-mode modal overlay (e.g. the Power Off? confirm)
+// owns the screen. Like gUpdateModeActive, it tells sendUsbSerialScreenshot() to
+// grab the LCD as-is instead of redrawing the current mode over the overlay.
+static volatile bool gOverlayActive = false;
 
 // "Boot straight into update mode" flag, kept in RTC memory so it survives the
 // ESP.restart() that the UPDATEMODE serial command triggers. Entering update
@@ -5051,13 +5057,21 @@ void processHardwareButtons() {
     btnALongPressHandled = false;
   }
 
-  if (now - lastButtonCheck < BUTTON_DEBOUNCE) return;
-
-  // 真ん中ボタン（B）
-  if (M5.BtnB.wasPressed()) {
-    handleButtonBAction();
-    lastButtonCheck = now;
-    return;
+  // 中央ボタン（B）: 短押し(離した時)=モード別動作、長押し=電源オフ確認 (全モード共通)。
+  // A/C と同様、短押しは release で発火し、押下中に長押しが成立したら短押しを抑止する。
+  if (M5.BtnB.isPressed()) {
+    if (!btnBLongPressHandled && M5.BtnB.pressedFor(MODE_LONG_PRESS_MS)) {
+      handleButtonBLongAction();
+      btnBLongPressHandled = true;
+      lastButtonCheck = now;
+    }
+  } else {
+    if (M5.BtnB.wasReleasefor(0) && !btnBLongPressHandled &&
+        (now - lastButtonCheck >= BUTTON_DEBOUNCE)) {
+      handleButtonBAction();
+      lastButtonCheck = now;
+    }
+    btnBLongPressHandled = false;
   }
 }
 
@@ -5611,6 +5625,45 @@ bool parseIntValue(const char* token, int& outValue) {
   return true;
 }
 
+// B 長押し: ソフト電源オフの確認オーバーレイ (全モード共通)。中央に "Power Off?" と
+// [Power Off] / [Cancel] を出し、画面タップで確定/取消する。確定で M5.Axp.PowerOff()
+// (戻らない)。誤操作で落ちないよう一手間 (タップ) を挟む。電源ボタン 5 秒長押しの代替。
+// 待ち受けは更新モードと同じ updGetTap()/updMaybeScreenshot() を流用するので、シリアル
+// の UPDTAP/SCREENSHOT で操作・撮影もできる。
+void confirmPowerOff() {
+  const int offX = 24,  offY = 150, offW = 130, offH = 64;   // [Power Off]
+  const int canX = 166, canY = 150, canW = 130, canH = 64;   // [Cancel]
+  M5.Lcd.fillScreen(BLACK);
+  uiFontMedium();
+  M5.Lcd.setTextColor(WHITE, BLACK);
+  M5.Lcd.setTextDatum(MC_DATUM);
+  M5.Lcd.drawString("Power Off?", SCREEN_WIDTH / 2, 64);
+  uiFontSmall();
+  M5.Lcd.setTextColor(DARKGREY, BLACK);
+  M5.Lcd.drawString("Tap Power Off to shut down", SCREEN_WIDTH / 2, 104);
+
+  M5.Lcd.fillRoundRect(offX, offY, offW, offH, 8, RED);
+  M5.Lcd.fillRoundRect(canX, canY, canW, canH, 8, DARKGREY);
+  M5.Lcd.setTextColor(WHITE, RED);
+  uiDrawC("Power Off", offX, offY, offW, offH);
+  M5.Lcd.setTextColor(WHITE, DARKGREY);
+  uiDrawC("Cancel", canX, canY, canW, canH);
+
+  gOverlayActive = true;    // SCREENSHOT はこのオーバーレイをそのまま撮る
+  while (true) {
+    TouchPoint_t p;
+    if (updGetTap(p)) {
+      if (touchInRect(p, offX, offY, offW, offH)) M5.Axp.PowerOff();  // 戻らない
+      break;  // Cancel / その他 → 取消
+    }
+    M5.update();
+    updMaybeScreenshot();   // マニュアル用に SCREENSHOT / UPDTAP を受け付ける
+    delay(10);
+  }
+  gOverlayActive = false;
+  needFullRedraw = true;    // 通常画面へ復帰
+}
+
 // A 短押し: 全モード共通で All Notes Off を「送信」する。
 // (SMF Player だけは従来どおり A=曲戻り/選曲ページ送りを維持)
 void handleButtonAAction() {
@@ -5636,9 +5689,10 @@ void handleButtonALongAction() {
   Serial.printf("All Notes Off mode: %s\n", allNotesOffEnabled ? "ON" : "OFF");
 }
 
-// B 長押し: A 長押しと同じく選曲画面の開閉。
+// B 長押し: 全モード共通でソフト電源オフの確認へ (SMF Player も統一)。
+// SMF の選曲ブラウザは A 長押しで引き続き開ける。
 void handleButtonBLongAction() {
-  if (currentMode == SMF_PLAYER_MODE) smfBrowserToggle();
+  confirmPowerOff();
 }
 
 void handleButtonBAction() {
@@ -5933,7 +5987,7 @@ void sendUsbSerialScreenshot(const char* formatToken) {
   // PSRAM スプライトは使わない (公式 M5Stack screenServer.ino と同方針)。
   // 更新モード中は通常UIを再描画すると更新画面が消えるのでスキップし、
   // すでに描かれている更新画面をそのまま読み出す。
-  if (!gUpdateModeActive) {
+  if (!gUpdateModeActive && !gOverlayActive) {
     needFullRedraw = false;
     needPartialUpdate = false;
     drawInterface();
@@ -6033,13 +6087,23 @@ void handleUsbSerialCommand(char* line) {
     }
 
     if (tokenEqualsIgnoreCase(button, "A")) {
-      handleButtonAAction();
-      Serial.println("OK BUTTON A");
+      if (modifier != nullptr && tokenEqualsIgnoreCase(modifier, "LONG")) {
+        handleButtonALongAction();
+        Serial.println("OK BUTTON A LONG");
+      } else {
+        handleButtonAAction();
+        Serial.println("OK BUTTON A");
+      }
       return;
     }
     if (tokenEqualsIgnoreCase(button, "B")) {
-      handleButtonBAction();
-      Serial.println("OK BUTTON B");
+      if (modifier != nullptr && tokenEqualsIgnoreCase(modifier, "LONG")) {
+        handleButtonBLongAction();
+        Serial.println("OK BUTTON B LONG");
+      } else {
+        handleButtonBAction();
+        Serial.println("OK BUTTON B");
+      }
       return;
     }
     if (tokenEqualsIgnoreCase(button, "C")) {
